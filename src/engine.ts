@@ -131,17 +131,17 @@ export function fitSettingsToFrame(
   if (settings.geometry.shape === "falling-stack") {
     // Define the stack in proportions of the rendered card, then convert to
     // Figma's pixel translation while respecting the containing frame.
-    const desiredTravel = itemHeight * nearScale * 0.18;
+    const desiredTravel = itemHeight * nearScale * 0.18 * settings.geometry.itemSpread / 0.72;
     const verticalTravel = settings.geometry.dynamicScale
       ? Math.min(availableY, desiredTravel)
       : desiredTravel;
     const travelRatio = 0.34 * Math.max(settings.geometry.itemSpread, 0.1);
     radiusY = verticalTravel / travelRatio;
   }
-  if (
+  if (settings.geometry.dynamicScale && (
     settings.geometry.shape === "ellipse" ||
     supportsOrbitOrientation(settings.geometry)
-  ) {
+  )) {
     const rotation = (settings.geometry.circleRotation ?? 0) * Math.PI / 180;
     const cosine = Math.cos(rotation);
     const sine = Math.sin(rotation);

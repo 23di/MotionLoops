@@ -1,7 +1,7 @@
 import { StrictMode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { createPortal } from "react-dom";
-import { DialRoot, DialStore, useDialKit, type DialConfig } from "dialkit";
+import { DialStore, useDialKit, type DialConfig } from "dialkit";
 import "dialkit/styles.css";
 import "./styles.css";
 import {
@@ -14,6 +14,8 @@ import {
   supportsPathGeometry,
 } from "./engine";
 import { builtInPresetTunings } from "./presets";
+import { families, freshPreset } from "./catalog";
+import { PresetEditor } from "./preset-editor";
 import { migrateSettingsToPercent, parseSettingsJson, serializeSettingsJson } from "./settings-json";
 import {
   presetOptions,
@@ -745,15 +747,15 @@ function OrbitPreview({
       ? previewIndex
       : Math.floor((previewIndex / drawCount) * itemCount);
     const sourceSize = target.items[previewIndex] ?? {
-      width: 3,
-      height: 4,
+      width: 72,
+      height: 92,
       offsetX: 0,
       offsetY: 0,
     };
     const fittedSettings = fitSettingsToFrame(
       settings,
-      target.frameWidth,
-      target.frameHeight,
+      target.frameWidth || 720,
+      target.frameHeight || 400,
       sourceSize.width,
       sourceSize.height,
     );
@@ -873,15 +875,7 @@ function OrbitPreview({
 }
 
 function settingsForPreset(settings: MotionSettings, preset: PresetId): MotionSettings {
-  const tuning = builtInPresetTunings[preset];
-  return {
-    ...settings,
-    preset,
-    motion: { ...settings.motion, ...tuning.motion },
-    geometry: { ...settings.geometry, ...tuning.geometry },
-    appearance: { ...settings.appearance, ...tuning.appearance },
-    other: { ...settings.other, ...tuning.other },
-  };
+  return freshPreset(preset, settings);
 }
 
 function PresetThumbnail({
@@ -902,7 +896,7 @@ function PresetThumbnail({
     Array.from({ length: drawCount }, (_, index) => {
       const source = target.items[index] ?? { width: 72, height: 92, offsetX: 0, offsetY: 0 };
       const fitted = fitSettingsToFrame(settings, frameWidth, frameHeight, source.width, source.height);
-      const thumbnailSize = fitPreviewItem(source.width, source.height, previewScale, 18, 24);
+      const thumbnailSize = fitPreviewItem(source.width, source.height, previewScale, 132, 84);
       return {
         index,
         frames: generateNodeKeyframes(fitted, index, itemCount),
@@ -918,12 +912,12 @@ function PresetThumbnail({
       time % Math.max(settings.motion.duration, 0.1),
       { type: "easing", duration: 1, ease: [0, 0, 1, 1] },
     ),
-  }));
+  })).sort((a, b) => (a.point.stackOrder ?? a.point.z) - (b.point.stackOrder ?? b.point.z));
 
   return (
     <div className="preset-thumbnail" aria-hidden="true">
       <div className="preset-thumbnail-grid" />
-      {cards.map(({ index, point, width, height }) => (
+      {cards.map(({ index, point, width, height }, order) => (
         <span
           className={`preset-thumbnail-card preview-card-${index % 5}`}
           key={index}
@@ -939,7 +933,7 @@ function PresetThumbnail({
             boxShadow: settings.appearance.frontShadow > 0 && point.z >= 0
               ? `0 ${settings.appearance.frontShadow * previewScale * .5}px ${settings.appearance.frontShadow * previewScale}px rgba(0,0,0,.3)`
               : undefined,
-            zIndex: point.stackOrder === undefined ? index : point.stackOrder * drawCount + index,
+            zIndex: order,
             transform: `translate3d(${point.x * previewScale}px, ${point.y * previewScale}px, 0) rotate(${point.rotation}deg) scale(${point.scaleX}, ${point.scaleY})`,
           }}
         />
@@ -957,11 +951,13 @@ function PresetGallery({
   target: TargetPreview;
   onSelect: (preset: PresetId) => void;
 }) {
-  const time = usePreviewTime(settings.motion.duration);
+  const time = usePreviewTime(3600);
   const galleryPresets = useMemo(() => (
-    presetOptions.map((preset) => ({
-      ...preset,
-      settings: settingsForPreset(settings, preset.value),
+    families.map((family) => ({
+      value: family.variants[0].id,
+      label: family.name,
+      description: family.description,
+      settings: settingsForPreset(settings, family.variants[0].id),
     }))
   ), [settings]);
 
@@ -974,6 +970,7 @@ function PresetGallery({
               className="preset-gallery-card"
               type="button"
               key={preset.value}
+              title={preset.description}
               onClick={() => onSelect(preset.value)}
               style={{ "--gallery-index": index } as React.CSSProperties}
             >
@@ -1196,10 +1193,6 @@ function App() {
   });
   const [status, setStatus] = useState<{ kind: "success" | "error"; message: string } | null>(null);
   const [operation, setOperation] = useState<"apply" | "clear" | null>(null);
-  const [easingPortalHost, setEasingPortalHost] = useState<HTMLElement | null>(null);
-  const [pathPortalHost, setPathPortalHost] = useState<HTMLElement | null>(null);
-  const [serviceLayersPortalHost, setServiceLayersPortalHost] = useState<HTMLElement | null>(null);
-  const [settingsJsonPortalHost, setSettingsJsonPortalHost] = useState<HTMLElement | null>(null);
 
   const resetSettings = useCallback(() => {
     setStatus(null);
@@ -1293,222 +1286,7 @@ function App() {
       }
     }
 
-    const updateDialKitUi = () => {
-      document.querySelectorAll<HTMLElement>(".dialkit-select-row").forEach((row) => {
-        const label = row.querySelector(".dialkit-select-label")?.textContent?.trim();
-        row.classList.toggle("orbit-hidden-preset", label === "Preset");
-      });
-      document.querySelectorAll<HTMLElement>(".dialkit-preset-item").forEach((item) => {
-        const name = item.querySelector(".dialkit-preset-name")?.textContent?.trim();
-        item.classList.toggle("orbit-hidden-base-preset", name === "Version 1");
-      });
-      document.querySelectorAll<HTMLButtonElement>(".dialkit-segmented-button").forEach((button) => {
-        const label = button.textContent?.trim();
-        button.classList.toggle(
-          "orbit-hidden-transition-mode",
-          label === "Time" || label === "Physics",
-        );
-      });
-
-      const transitionFolders = Array.from(
-        document.querySelectorAll<HTMLElement>(".dialkit-folder:not(.dialkit-folder-root)"),
-      );
-      const fullCycleFolder = transitionFolders.find((folder) => (
-        folder.querySelector<HTMLElement>(".dialkit-folder-title")?.textContent?.trim() ===
-        "Full Cycle"
-      ));
-      const geometryFolder = transitionFolders.find((folder) => (
-        folder.querySelector<HTMLElement>(".dialkit-folder-title")?.textContent?.trim() ===
-        "Geometry"
-      ));
-
-      for (const folder of [fullCycleFolder]) {
-        const typeRow = Array.from(
-          folder?.querySelectorAll<HTMLElement>(".dialkit-labeled-control") ?? [],
-        ).find((row) => (
-          row.querySelector<HTMLElement>(".dialkit-labeled-control-label")?.textContent?.trim() ===
-          "Type"
-        ));
-        if (typeRow) typeRow.classList.add("orbit-transition-type-row");
-        if (folder === fullCycleFolder) typeRow?.classList.add("orbit-hidden-transition-type");
-        const durationRow = Array.from(
-          folder?.querySelectorAll<HTMLElement>(".dialkit-slider-wrapper") ?? [],
-        ).find((row) => (
-          row.querySelector<HTMLElement>(".dialkit-slider-label")?.textContent?.trim() ===
-          "Duration"
-        ));
-        durationRow?.classList.add("orbit-hidden-transition-duration");
-      }
-      document.querySelectorAll<HTMLElement>(".dialkit-text-control").forEach((row) => {
-        const label = row.querySelector<HTMLElement>(".dialkit-text-label")
-          ?.textContent?.trim();
-        if (label === "Custom Path") row.classList.add("orbit-hidden-custom-path");
-      });
-      document.querySelectorAll<HTMLElement>(".dialkit-labeled-control-label").forEach((label) => {
-        if (label.textContent?.trim() === "Orient3d") label.textContent = "3D orientation";
-      });
-      document.querySelectorAll<HTMLElement>(".dialkit-slider-label").forEach((label) => {
-        const text = label.textContent?.trim();
-        if (text === "Radius X") label.textContent = "Radius X (%)";
-        if (text === "Radius Y") label.textContent = "Radius Y (%)";
-        if (text === "Depth") label.textContent = "Depth (%)";
-      });
-
-
-      const fullCycleContent = fullCycleFolder?.querySelector<HTMLElement>(".dialkit-folder-inner > div");
-      if (fullCycleContent) {
-        fullCycleFolder?.classList.add("orbit-inline-transition-folder");
-        let host = fullCycleContent.querySelector<HTMLElement>(":scope > .orbit-easing-portal");
-        if (!host) {
-          host = document.createElement("div");
-          host.className = "orbit-easing-portal";
-          fullCycleContent.prepend(host);
-        }
-        setEasingPortalHost((current) => current === host ? current : host);
-      }
-
-      const shapeRow = Array.from(
-        geometryFolder?.querySelectorAll<HTMLElement>(".dialkit-select-row") ?? [],
-      ).find((row) => row.querySelector(".dialkit-select-label")?.textContent?.trim() === "Shape");
-      const unitsRow = Array.from(
-        geometryFolder?.querySelectorAll<HTMLElement>(".dialkit-select-row") ?? [],
-      ).find((row) => row.querySelector(".dialkit-select-label")?.textContent?.trim() === "Units");
-      unitsRow?.classList.add("orbit-control-hidden");
-      if (shapeRow) {
-        let host = shapeRow.nextElementSibling as HTMLElement | null;
-        if (!host?.classList.contains("orbit-path-portal")) {
-          host = document.createElement("div");
-          host.className = "orbit-path-portal";
-          shapeRow.after(host);
-        }
-        setPathPortalHost((current) => current === host ? current : host);
-      }
-
-      const otherFolder = Array.from(
-        document.querySelectorAll<HTMLElement>(".dialkit-folder:not(.dialkit-folder-root)"),
-      ).find((folder) => (
-        folder.querySelector<HTMLElement>(".dialkit-folder-title")?.textContent?.trim() === "Other"
-      ));
-      const folderInner = otherFolder?.querySelector<HTMLElement>(".dialkit-folder-inner");
-      const serviceLayersRow = Array.from(
-        otherFolder?.querySelectorAll<HTMLElement>(".dialkit-select-row") ?? [],
-      ).find((row) => (
-        row.querySelector<HTMLElement>(".dialkit-select-label")?.textContent?.trim() ===
-        "Service Layers"
-      ));
-      if (serviceLayersRow) {
-        serviceLayersRow.classList.add("orbit-control-hidden");
-        let host = serviceLayersRow.nextElementSibling as HTMLElement | null;
-        if (!host?.classList.contains("orbit-service-layers-portal")) {
-          host = document.createElement("div");
-          host.className = "orbit-service-layers-portal";
-          serviceLayersRow.after(host);
-        }
-        setServiceLayersPortalHost((current) => current === host ? current : host);
-      }
-      const settingsJsonButton = Array.from(
-        otherFolder?.querySelectorAll<HTMLButtonElement>(".dialkit-action-button") ?? [],
-      ).find((button) => button.textContent?.trim() === "Settings JSON");
-      if (settingsJsonButton) {
-        settingsJsonButton.classList.add("orbit-control-hidden");
-        let host = settingsJsonButton.previousElementSibling as HTMLElement | null;
-        if (!host?.classList.contains("orbit-settings-json-portal")) {
-          host = document.createElement("div");
-          host.className = "orbit-settings-json-portal";
-          settingsJsonButton.before(host);
-        }
-        setSettingsJsonPortalHost((current) => current === host ? current : host);
-      }
-      if (folderInner && !folderInner.querySelector(".orbit-library-links")) {
-        const links = document.createElement("div");
-        links.className = "orbit-library-links";
-        links.setAttribute("aria-label", "Open source libraries");
-        for (const library of libraryLinks) {
-          const anchor = document.createElement("a");
-          anchor.href = library.href;
-          anchor.target = "_blank";
-          anchor.rel = "noreferrer";
-          anchor.textContent = library.label;
-          links.append(anchor);
-        }
-        folderInner.append(links);
-      }
-    };
-    updateDialKitUi();
-    const observer = new MutationObserver(updateDialKitUi);
-    observer.observe(document.body, { childList: true, subtree: true });
-    return () => observer.disconnect();
   }, []);
-
-  useEffect(() => {
-    const disabled = effectiveValues.geometry.dynamicScale;
-    const parametric = effectiveValues.geometry.shape === "parametric";
-    const depthWave = parametric || effectiveValues.geometry.shape === "ellipse" ||
-      effectiveValues.geometry.shape === "custom-path";
-    const shapeAmount = ["deck", "shuffle", "tunnel", "cylinder", "racetrack", "fan", "pendulum", "vortex", "focus-deck"]
-      .includes(effectiveValues.geometry.shape);
-    const itemSpread = ["deck", "shuffle", "falling-stack", "cylinder", "fan", "pendulum", "focus-deck"]
-      .includes(effectiveValues.geometry.shape);
-    const depthFalloff = effectiveValues.geometry.shape === "deck" || effectiveValues.geometry.shape === "focus-deck";
-    document.querySelectorAll<HTMLElement>(".dialkit-select-row").forEach((row) => {
-      const label = row.querySelector<HTMLElement>(".dialkit-select-label")?.textContent?.trim();
-      if (label === "X Wave" || label === "Y Wave") {
-        row.classList.toggle("orbit-control-hidden", !parametric);
-      } else if (label === "Depth Wave") {
-        row.classList.toggle("orbit-control-hidden", !depthWave);
-      }
-    });
-    document.querySelectorAll<HTMLElement>(".dialkit-slider-wrapper").forEach((wrapper) => {
-      const label = wrapper.querySelector<HTMLElement>(".dialkit-slider-label")?.textContent?.trim();
-      if (["X Frequency", "Y Frequency", "X Amplitude", "Y Amplitude", "X Phase", "Y Phase", "Y Offset"].includes(label ?? "")) {
-        wrapper.classList.toggle("orbit-control-hidden", !parametric);
-        return;
-      }
-      if (["Depth Frequency", "Depth Amplitude", "Depth Phase"].includes(label ?? "")) {
-        wrapper.classList.toggle("orbit-control-hidden", !depthWave);
-        return;
-      }
-      if (label === "Shape Amount") {
-        wrapper.classList.toggle("orbit-control-hidden", !shapeAmount);
-        return;
-      }
-      if (label === "Item Spread") {
-        wrapper.classList.toggle("orbit-control-hidden", !itemSpread);
-        return;
-      }
-      if (label === "Depth Falloff") {
-        wrapper.classList.toggle("orbit-control-hidden", !depthFalloff);
-        return;
-      }
-      if (label === "Tilt") {
-        wrapper.classList.toggle("orbit-control-hidden", !effectiveValues.geometry.orient3d);
-        return;
-      }
-      if (label === "Circle Rotation" || label === "Orbit Rotation") {
-        const labelElement = wrapper.querySelector<HTMLElement>(".dialkit-slider-label");
-        const orbitOrientation = supportsOrbitOrientation(effectiveValues.geometry);
-        const nextLabel = orbitOrientation ? "Orbit Rotation" : "Circle Rotation";
-        if (labelElement && labelElement.textContent !== nextLabel) labelElement.textContent = nextLabel;
-        wrapper.querySelector<HTMLElement>('[role="slider"]')?.setAttribute("aria-label", nextLabel);
-        wrapper.classList.toggle(
-          "orbit-control-hidden",
-          !orbitOrientation && (
-            effectiveValues.geometry.shape !== "ellipse"
-          ),
-        );
-        return;
-      }
-      if (label?.startsWith("Radius X") || label?.startsWith("Radius Y")) {
-        wrapper.classList.toggle("orbit-control-hidden", disabled);
-        wrapper.inert = disabled;
-        wrapper.setAttribute("aria-disabled", String(disabled));
-        const slider = wrapper.querySelector<HTMLElement>('[role="slider"]');
-        slider?.setAttribute("aria-disabled", String(disabled));
-        if (disabled) slider?.setAttribute("tabindex", "-1");
-        else slider?.setAttribute("tabindex", "0");
-      }
-    });
-  }, [effectiveValues.geometry.dynamicScale, effectiveValues.geometry.shape, effectiveValues.geometry.orient3d, pathPortalHost]);
 
   useEffect(() => {
     window.onmessage = (event: MessageEvent<{ pluginMessage?: PluginToUiMessage }>) => {
@@ -1620,12 +1398,7 @@ function App() {
   };
 
   const selectPreset = (preset: PresetId) => {
-    const label = presetOptions.find((option) => option.value === preset)?.label;
-    const storedPreset = label
-      ? DialStore.getPresets(panelId).find((item) => item.name === label)
-      : undefined;
-    if (storedPreset) DialStore.loadPreset(panelId, storedPreset.id);
-    else applyBuiltInPresetTuning(preset);
+    applySettingsToStore(freshPreset(preset, effectiveValues));
     window.scrollTo({ top: 0, behavior: "auto" });
     setPage("editor");
   };
@@ -1654,49 +1427,11 @@ function App() {
 
       {status && <div className={`status ${status.kind}`}>{status.message}</div>}
 
-      <section className="dial-panel">
-        <DialRoot mode="inline" theme={theme} productionEnabled />
-        {easingPortalHost && createPortal(
-          <EasingPresetManager transition={values.motion.fullCycle} />,
-          easingPortalHost,
-        )}
-        {pathPortalHost && (supportsPathGeometry(effectiveValues.geometry.shape) || supportsOrbitOrientation(effectiveValues.geometry)) && createPortal(
-          <GeometryPathEditor settings={effectiveValues} target={selection.targets[effectiveValues.other.scope]} />,
-          pathPortalHost,
-        )}
-        {serviceLayersPortalHost && createPortal(
-          <div className="dialkit-labeled-control orbit-service-layers-control">
-            <span className="dialkit-labeled-control-label">Service Layers</span>
-            <div className="dialkit-segmented" role="radiogroup" aria-label="Service Layers">
-              {(["0", "2", "3", "4", "5"] as const).map((value) => {
-                const active = effectiveValues.other.serviceLayers === value;
-                return (
-                  <button
-                    className="dialkit-segmented-button"
-                    data-active={String(active)}
-                    key={value}
-                    type="button"
-                    role="radio"
-                    aria-checked={active}
-                    tabIndex={active ? 0 : -1}
-                    onClick={() => DialStore.updateValue(panelId, "other.serviceLayers", value)}
-                  >
-                    {value === "0" ? "Off" : value === "5" ? "5+" : value}
-                  </button>
-                );
-              })}
-            </div>
-          </div>,
-          serviceLayersPortalHost,
-        )}
-        {settingsJsonPortalHost && createPortal(
-          <div className="orbit-settings-json-actions" role="group" aria-label="Settings JSON">
-            <button className="dialkit-action-button" type="button" onClick={copySettingsJson}>Copy JSON</button>
-            <button className="dialkit-action-button" type="button" onClick={pasteSettingsJson} aria-label="Paste settings JSON">Paste</button>
-          </div>,
-          settingsJsonPortalHost,
-        )}
-      </section>
+      <PresetEditor settings={effectiveValues} onChange={applySettingsToStore}
+        copy={copySettingsJson} paste={pasteSettingsJson}
+        saved={DialStore.getPresets(panelId).filter((item) => !presetOptions.some((preset) => preset.label === item.name) && item.name !== "Version 1")}
+        load={(id) => DialStore.loadPreset(panelId, id)}
+        save={(name) => DialStore.savePreset(panelId, name)} />
 
       <div className="dialkit-root bottom-actions" data-theme={theme}>
         <button

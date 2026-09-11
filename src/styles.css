@@ -30,6 +30,38 @@
   --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
 }
 
+.simple-editor { margin: 12px 16px 88px; color: var(--orbit-text); font-size: 12px; }
+.simple-editor button, .simple-editor select, .simple-editor input:not([type=range]):not([type=checkbox]) {
+  font: inherit; color: inherit; background: var(--orbit-button-secondary); border: 1px solid var(--line); border-radius: 7px; min-height: 32px;
+}
+.simple-editor button { padding: 6px 10px; cursor: pointer; }
+.simple-editor button:disabled { opacity: .4; cursor: default; }
+.simple-editor button:hover:not(:disabled) { background: var(--orbit-button-secondary-hover); }
+.simple-editor :focus-visible { outline: 2px solid #8d9dff; outline-offset: 2px; }
+.family-picker { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 12px 0; }
+.family-picker select { padding: 5px 9px; max-width: 75%; }
+.quick-settings { display: flex; align-items: center; gap: 5px; overflow-x: auto; padding: 2px 0 12px; white-space: nowrap; }
+.quick-settings > * { flex-shrink: 0; }
+.quick-settings select { max-width: 110px; padding: 4px; }
+.quick-settings button { padding: 5px 7px; }
+.quick-settings button[aria-pressed=true] { background: var(--orbit-button-primary); color: var(--orbit-button-primary-text); }
+.quick-angle { display: flex; gap: 3px; align-items: center; }
+.quick-angle input { width: 44px; text-align: center; padding: 2px; }
+.settings-tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); padding-bottom: 7px; }
+.settings-tabs button { flex: 1; background: transparent; border-color: transparent; color: var(--orbit-icon); }
+.settings-tabs button[aria-selected=true] { color: var(--orbit-text); background: var(--orbit-button-secondary); }
+.settings-content { padding-top: 8px; min-height: 220px; }
+.simple-slider { display: block; margin: 15px 0; }
+.simple-slider > span { display: flex; justify-content: space-between; margin-bottom: 8px; }
+.simple-slider output { color: var(--orbit-icon); font-variant-numeric: tabular-nums; }
+.simple-slider input { width: 100%; margin: 0; accent-color: #9da8ff; cursor: pointer; }
+.simple-toggle { display: flex; justify-content: space-between; align-items: center; margin: 18px 0; }
+.simple-toggle input { accent-color: #9da8ff; }
+.settings-hint { color: var(--orbit-icon); line-height: 1.5; font-size: 11px; }
+.save-preset { display: flex; gap: 6px; margin: 14px 0; }
+.save-preset input { min-width: 0; flex: 1; padding: 6px 9px; }
+.reset-preset { width: 100%; margin-top: 12px; }
+
 @media (prefers-color-scheme: light) {
   :root {
     --orbit-text: #1f1f1f;

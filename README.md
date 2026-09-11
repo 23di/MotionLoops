@@ -7,10 +7,10 @@ Orbit Animator is completely free. Everything runs locally — no analytics, no 
 ## Features
 
 - Create editable Figma Motion keyframes from selected layers
-- Choose from 20 orbit, path, stack, carousel, and simulated 3D presets
+- Choose from 9 distinct animation families with 21 quick variations
 - Fit motion automatically to the selected frame or set the radii manually
-- Shape motion with ellipse, custom path, parametric, sphere, deck, tunnel, cylinder, racetrack, fan, pendulum, and vortex geometry
-- Control timing, stagger, direction, keyframe density, easing, scale, opacity, rotation, and depth
+- Change variation, direction, and applicable angles in a single quick-settings row
+- Adjust timing and spacing in Motion, scale and effects in Look, and selection/saved variations in Setup
 - Preview the generated animation before applying it
 - Save custom presets locally and reuse them later
 - Refresh an existing Orbit animation or clear its generated tracks
@@ -19,7 +19,13 @@ The pseudo-3D presets use the Motion properties currently available to plugins: 
 
 ## Presets
 
-Circle, Path Wave, Vision Focus, Scatter Orbit, Arc Carousel, 3D Turntable, 3D Vertical Halo, 3D Saturn Tilt, 3D Double Helix, 3D Figure Eight, 3D Sphere, Cover Flow, Stack Shuffle, Tunnel, Cylinder, Racetrack, Fan, Pendulum, Vortex, and Focus Swap.
+Orbit, Path, Carousel, Stack, Sphere, Fan, Swing, Spiral, and Field.
+
+Related motions live inside each family: Orbit includes flat, vertical, tilted, and soft-focus variations; Path includes wave, track, arc, figure eight, and helix; Carousel includes deck, focus, and step; Stack includes fall and shuffle; Field includes scatter and rows.
+
+Selecting a variation starts from its own defaults and preserves the target selection scope. Custom variations can be saved under Setup. Existing preset IDs and JSON settings remain supported, including advanced parameters no longer exposed in the interface. Geometry uses percentages; the engine resolves these into Figma coordinates.
+
+`npm test` checks the catalog, visible motion controls, preset isolation, JSON round trips, multiple frame sizes and card counts, loop endpoints, and generated Figma tracks. Browser QA is separate from playback in the native Figma Motion runtime.
 
 ## Run locally
 
