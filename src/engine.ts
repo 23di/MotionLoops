@@ -7,6 +7,7 @@ import type {
 } from "./types";
 
 export interface PointState {
+  stackOrder?: number;
   x: number;
   y: number;
   z: number;
@@ -18,6 +19,7 @@ export interface PointState {
 
 export interface GeneratedKeyframe extends PointState {
   time: number;
+  curveBoundary?: boolean;
 }
 
 export type DepthLayer = "front" | "back";
@@ -68,6 +70,22 @@ export function fitPreviewFrame(
   return { width: width * scale, height: height * scale };
 }
 
+export function fitPreviewItem(
+  width: number,
+  height: number,
+  scale: number,
+  maxWidth: number,
+  maxHeight: number,
+): { width: number; height: number } {
+  const safeWidth = Math.max(width, 1);
+  const safeHeight = Math.max(height, 1);
+  const fittedScale = Math.min(scale, maxWidth / safeWidth, maxHeight / safeHeight);
+  return {
+    width: Math.max(1, safeWidth * fittedScale),
+    height: Math.max(1, safeHeight * fittedScale),
+  };
+}
+
 export function fitSettingsToFrame(
   settings: MotionSettings,
   frameWidth: number,
@@ -76,27 +94,50 @@ export function fitSettingsToFrame(
   itemHeight: number,
 ): MotionSettings {
   if (
-    settings.geometry.dynamicScale === false ||
     frameWidth <= 0 ||
     frameHeight <= 0 ||
     itemWidth <= 0 ||
     itemHeight <= 0
   ) return settings;
+  if (settings.geometry.dynamicScale === false && settings.geometry.units === "pixels") {
+    return settings;
+  }
 
-  const padding = Math.min(24, Math.min(frameWidth, frameHeight) * 0.06);
-  const fitScale = Math.max(0.05, Math.min(
-    settings.appearance.nearScale,
-    (frameWidth - padding * 2) / itemWidth,
-    (frameHeight - padding * 2) / itemHeight,
-  ));
+  const padding = Math.min(frameWidth, frameHeight) * 0.02;
+  const percentUnits = settings.geometry.units === "percent";
+  const verticalFootprint = settings.geometry.shape === "falling-stack" ? 1.36 : 1;
+  const fitScale = settings.geometry.dynamicScale
+    ? Math.max(0.05, Math.min(
+        settings.appearance.nearScale,
+        (frameWidth - padding * 2) / itemWidth,
+        (frameHeight - padding * 2) / (itemHeight * verticalFootprint),
+      ))
+    : settings.appearance.nearScale;
   const nearScale = Math.min(settings.appearance.nearScale, fitScale);
   const scaleRatio = settings.appearance.nearScale > 0
     ? nearScale / settings.appearance.nearScale
     : 1;
   const availableX = Math.max(0, (frameWidth - itemWidth * nearScale) / 2 - padding);
   const availableY = Math.max(0, (frameHeight - itemHeight * nearScale) / 2 - padding);
-  let radiusX = availableX;
-  let radiusY = availableY;
+  let radiusX = percentUnits ? frameWidth * settings.geometry.radiusX / 100 : availableX;
+  let radiusY = percentUnits ? frameHeight * settings.geometry.radiusY / 100 : availableY;
+  let resolvedDepth = percentUnits
+    ? Math.min(frameWidth, frameHeight) * settings.geometry.depth / 100
+    : settings.geometry.depth;
+  if (settings.geometry.dynamicScale) {
+    radiusX = Math.min(radiusX, availableX);
+    radiusY = Math.min(radiusY, availableY);
+  }
+  if (settings.geometry.shape === "falling-stack") {
+    // Define the stack in proportions of the rendered card, then convert to
+    // Figma's pixel translation while respecting the containing frame.
+    const desiredTravel = itemHeight * nearScale * 0.18;
+    const verticalTravel = settings.geometry.dynamicScale
+      ? Math.min(availableY, desiredTravel)
+      : desiredTravel;
+    const travelRatio = 0.34 * Math.max(settings.geometry.itemSpread, 0.1);
+    radiusY = verticalTravel / travelRatio;
+  }
   if (
     settings.geometry.shape === "ellipse" ||
     supportsOrbitOrientation(settings.geometry)
@@ -119,8 +160,10 @@ export function fitSettingsToFrame(
     ...settings,
     geometry: {
       ...settings.geometry,
+      units: "pixels",
       radiusX,
       radiusY,
+      depth: resolvedDepth,
     },
     appearance: {
       ...settings.appearance,
@@ -302,6 +345,7 @@ export function pointForGeometry(
   let scaleXMultiplier = 1;
   let scaleYMultiplier = 1;
   let opacityMultiplier = 1;
+  let stackOrder: number | undefined;
   let orbitPlaneScaleY = ry;
 
   const parametric = parametricCoordinates(angle, settings.geometry);
@@ -351,6 +395,48 @@ export function pointForGeometry(
       z = depth * Math.cos(cycle * TAU);
       presetRotation = Math.sin(cycle * TAU) * 18 * shapeAmount;
       pathAngle = cycle * TAU;
+      break;
+    }
+    case "falling-stack": {
+      const itemInterval = 1 / safeCount;
+      const visibleSteps = Math.min(3, safeCount);
+      const directionSign = settings.motion.direction === "clockwise" ? 1 : -1;
+      const rawStep = cycle / Math.max(itemInterval, Number.EPSILON);
+      const step = Math.abs(rawStep - Math.round(rawStep)) < 1e-10
+        ? Math.round(rawStep) % safeCount : rawStep;
+      const stage = Math.floor(step);
+      stackOrder = Math.max(0, 3 - stage);
+      const stageProgress = smoothStep01(clamp((step - stage) / 0.42, 0, 1));
+      const stackOffset = ry * 0.34 * itemSpread;
+      if (stage === 0) {
+        // The incoming card is the new top card. It stays on the front depth
+        // layer while falling instead of travelling through the stack behind it.
+        x = 0;
+        y = -directionSign * stackOffset * (1 - stageProgress);
+        z = depth * 0.92;
+        presetRotation = 0;
+        opacityMultiplier = stageProgress;
+      } else if (stage < visibleSteps) {
+        const slot = stage - 1 + stageProgress;
+        x = 0;
+        y = -directionSign * stackOffset * slot / Math.max(visibleSteps - 1, 1);
+        z = depth * (0.92 - 1.84 * slot / Math.max(visibleSteps - 1, 1));
+        presetRotation = 0;
+        opacityMultiplier = 1;
+      } else if (stage === visibleSteps) {
+        x = 0;
+        y = -directionSign * stackOffset * (1 + stageProgress * 0.08);
+        z = -depth * 0.92;
+        presetRotation = 0;
+        opacityMultiplier = 1 - stageProgress;
+      } else {
+        x = 0;
+        y = -directionSign * stackOffset;
+        z = -depth * 0.92;
+        presetRotation = 0;
+        opacityMultiplier = 0;
+      }
+      pathAngle = Math.PI / 2;
       break;
     }
     case "tunnel": {
@@ -501,13 +587,15 @@ export function pointForGeometry(
   );
   const opacity = settings.appearance.farOpacity +
     easedOpacity * (1 - settings.appearance.farOpacity);
-  const rotationValue = settings.geometry.shape === "deck"
+  const rotationValue = settings.geometry.shape === "deck" ||
+    settings.geometry.shape === "falling-stack"
     ? 0
     : presetRotation + (settings.appearance.facePath
       ? (pathAngle * 180) / Math.PI + rotation
       : rotation * Math.sin(angle));
 
   return {
+    ...(stackOrder === undefined ? {} : { stackOrder }),
     x,
     y,
     z,
@@ -523,19 +611,32 @@ export function generateNodeKeyframes(
   index: number,
   count: number,
 ): GeneratedKeyframe[] {
-  const samples = clamp(Math.round(settings.motion.keyframes), 4, 48);
+  const fallingStack = settings.geometry.shape === "falling-stack";
+  const samples = fallingStack ? Math.max(1, count) * 24 : clamp(Math.round(settings.motion.keyframes), 4, 48);
   const direction = settings.motion.direction === "clockwise" ? 1 : -1;
   const itemPhase = count > 1 ? (index / count) * TAU : 0;
   const staggerPhase = (settings.motion.stagger * index / settings.motion.duration) * TAU;
   const result: GeneratedKeyframe[] = [];
 
-  for (let sample = 0; sample <= samples; sample += 1) {
-    const progress = sample / samples;
+  const positions = Array.from({ length: samples + 1 }, (_, sample) => sample / samples);
+  if (fallingStack) {
+    for (let step = 1; step <= Math.max(1, count); step += 1) {
+      positions.push(step / Math.max(1, count) - 1e-7);
+      positions.push((step - 1 + 0.42) / Math.max(1, count));
+    }
+    positions.sort((a, b) => a - b);
+  }
+  for (const progress of positions) {
     const cycleProgress = transitionProgress(progress, settings.motion.fullCycle);
-    const angle = itemPhase + staggerPhase +
-      direction * cycleProgress * TAU * settings.geometry.turns;
+    // Falling Stack has a one-way physical action: cards must always fall
+    // forward in time. Direction mirrors the vertical movement.
+    const angle = (fallingStack ? -itemPhase : itemPhase + staggerPhase) +
+      (fallingStack ? 1 : direction) * cycleProgress * TAU * settings.geometry.turns;
     result.push({
       time: progress * settings.motion.duration,
+      ...(fallingStack ? {
+        curveBoundary: Math.abs((progress * Math.max(1, count) % 1) - 0.42) < 1e-10,
+      } : {}),
       ...pointForGeometry(angle, settings, index, count),
     });
   }
@@ -588,6 +689,9 @@ export function transitionProgress(progress: number, transition: DialTransition)
     return springProgress(safeProgress, transition.bounce ?? 0.25);
   }
   if (Array.isArray(transition.ease) && transition.ease.length === 4) {
+    if (transition.ease[0] === transition.ease[1] && transition.ease[2] === transition.ease[3]) {
+      return safeProgress;
+    }
     return cubicBezierProgress(safeProgress, transition.ease);
   }
   return safeProgress;
@@ -617,6 +721,7 @@ export function sampleGeneratedKeyframes(
   const eased = hold ? 0 : transitionProgress(local, transition);
 
   return {
+    ...(from.stackOrder === undefined ? {} : { stackOrder: from.stackOrder }),
     x: lerp(from.x, to.x, eased),
     y: lerp(from.y, to.y, eased),
     z: lerp(from.z, to.z, eased),

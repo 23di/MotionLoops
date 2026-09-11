@@ -723,7 +723,7 @@ main {
 
 .orbit-settings-json-portal,
 .orbit-settings-json-actions {
-  width: 160px;
+  width: 100%;
 }
 
 .orbit-settings-json-actions {
@@ -733,7 +733,8 @@ main {
 }
 
 .orbit-settings-json-actions .dialkit-action-button {
-  width: auto;
+  width: 100%;
+  height: var(--dial-row-height);
   min-width: 0;
   padding-inline: 8px;
   white-space: nowrap;

@@ -12,6 +12,7 @@ export const presetOptions = [
   { value: "orbit-3d-sphere", label: "3D · Sphere" },
   { value: "cover-flow", label: "Cover Flow" },
   { value: "stack-shuffle", label: "Stack Shuffle" },
+  { value: "falling-stack", label: "Falling Stack" },
   { value: "cylinder", label: "Cylinder" },
   { value: "racetrack", label: "Racetrack" },
   { value: "fan", label: "Fan" },
@@ -26,6 +27,7 @@ export type TargetScope = "selection" | "children" | "deep";
 export type Direction = "clockwise" | "counterclockwise";
 export type OpacityCurve = "linear" | "early" | "late" | "soft" | "sharp";
 export type WaveFunction = "sin" | "cos";
+export type GeometryUnits = "percent" | "pixels";
 export type GeometryShape =
   | "ellipse"
   | "custom-path"
@@ -33,6 +35,7 @@ export type GeometryShape =
   | "sphere"
   | "deck"
   | "shuffle"
+  | "falling-stack"
   | "tunnel"
   | "cylinder"
   | "racetrack"
@@ -68,6 +71,7 @@ export interface MotionSettings {
     fullCycle: DialTransition;
   };
   geometry: {
+    units: GeometryUnits;
     shape: GeometryShape;
     dynamicScale: boolean;
     customPath: string;

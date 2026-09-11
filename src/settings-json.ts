@@ -47,6 +47,26 @@ export function serializeSettingsJson(settings: MotionSettings): string {
   return JSON.stringify(settings, null, 2);
 }
 
+export function migrateSettingsToPercent(
+  settings: MotionSettings,
+  frameWidth = 720,
+  frameHeight = 400,
+): MotionSettings {
+  if (settings.geometry.units === "percent") return settings;
+  const width = frameWidth > 0 ? frameWidth : 720;
+  const height = frameHeight > 0 ? frameHeight : 400;
+  return {
+    ...settings,
+    geometry: {
+      ...settings.geometry,
+      units: "percent",
+      radiusX: settings.geometry.radiusX / width * 100,
+      radiusY: settings.geometry.radiusY / height * 100,
+      depth: settings.geometry.depth / Math.min(width, height) * 100,
+    },
+  };
+}
+
 export function parseSettingsJson(text: string, current: MotionSettings): MotionSettings {
   if (!text.trim()) throw new Error("Clipboard is empty.");
   if (text.length > maximumSettingsJsonLength) throw new Error("Settings JSON is too large.");
@@ -57,10 +77,24 @@ export function parseSettingsJson(text: string, current: MotionSettings): Motion
   } catch {
     throw new Error("Clipboard does not contain valid JSON.");
   }
-  const candidate = isRecord(parsed) && isRecord(parsed.settings) ? parsed.settings : parsed;
+  let candidate = isRecord(parsed) && isRecord(parsed.settings) ? parsed.settings : parsed;
   if (!isRecord(candidate) || !isRecord(candidate.motion) || !isRecord(candidate.geometry) ||
     !isRecord(candidate.appearance) || !isRecord(candidate.other)) {
     throw new Error("This is not an Orbit Animator settings JSON.");
+  }
+
+  if (!("units" in candidate.geometry)) {
+    const geometry = candidate.geometry;
+    candidate = {
+      ...candidate,
+      geometry: {
+        ...geometry,
+        units: "percent",
+        radiusX: typeof geometry.radiusX === "number" ? geometry.radiusX / 7.2 : geometry.radiusX,
+        radiusY: typeof geometry.radiusY === "number" ? geometry.radiusY / 4 : geometry.radiusY,
+        depth: typeof geometry.depth === "number" ? geometry.depth / 4 : geometry.depth,
+      },
+    };
   }
 
   const settings = mergeCompatible(current, candidate, "settings") as MotionSettings;
@@ -69,7 +103,9 @@ export function parseSettingsJson(text: string, current: MotionSettings): Motion
   oneOf(settings.geometry.shape, [
     "ellipse", "custom-path", "parametric", "sphere", "deck", "shuffle", "tunnel",
     "cylinder", "racetrack", "focus-deck", "fan", "pendulum", "vortex",
+    "falling-stack",
   ], "settings.geometry.shape");
+  oneOf(settings.geometry.units, ["percent", "pixels"], "settings.geometry.units");
   for (const wave of [settings.geometry.xWave, settings.geometry.yWave, settings.geometry.depthWave]) {
     oneOf(wave, ["sin", "cos"], "settings.geometry wave");
   }

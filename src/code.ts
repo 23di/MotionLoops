@@ -422,16 +422,24 @@ function sparseFloatTrack(
     fit(split, end);
   };
 
-  if (steppedState) {
+  if (steppedState || frames.some((frame) => frame.stackOrder !== undefined)) {
     let segmentStart = 0;
     for (let index = 1; index < frames.length; index += 1) {
-      if (steppedState(frames[index]) === steppedState(frames[index - 1])) continue;
+      const stateChanged = steppedState && steppedState(frames[index]) !== steppedState(frames[index - 1]);
+      const stackChanged = frames[index].stackOrder !== frames[index - 1].stackOrder;
+      if (!stateChanged && !stackChanged) {
+        if (frames[index].curveBoundary) {
+          fit(segmentStart, index);
+          segmentStart = index;
+        }
+        continue;
+      }
 
       // Front/back copies occupy the same pixels at a depth handoff. A regular
       // crossfade briefly composites two translucent copies and looks darker.
       // HOLD keeps exactly one copy visible, then switches it on this keyframe.
       fit(segmentStart, index - 1);
-      selected.set(index, holdEasing);
+      selected.set(index, stateChanged ? holdEasing : linearEasing);
       segmentStart = index;
     }
     fit(segmentStart, frames.length - 1);
@@ -448,6 +456,20 @@ function sparseFloatTrack(
         value: { type: "FLOAT", value: values[index] },
       })),
   };
+}
+
+function sampledFloatTrack(
+  baseValue: number,
+  frames: ReturnType<typeof generateNodeKeyframes>,
+  value: (frame: ReturnType<typeof generateNodeKeyframes>[number]) => number,
+  steppedState?: (frame: ReturnType<typeof generateNodeKeyframes>[number]) => boolean,
+): ManualKeyframeTrackInput {
+  const values = frames.map(value);
+  const range = Math.max(...values) - Math.min(...values);
+  // Sampling is only an internal reference. Export cubic segments, retaining
+  // exact layer handoffs and movement/hold boundaries.
+  if (range === 0) return sparseFloatTrack(baseValue, [frames[0], frames[frames.length - 1]], value, 0);
+  return sparseFloatTrack(baseValue, frames, value, Math.max(1e-7, range * 1e-5), steppedState);
 }
 
 function frameCenterOffset(node: MotionNode): { x: number; y: number } {
@@ -709,6 +731,7 @@ async function ensureBackCopies(
 
 function depthBand(frame: ReturnType<typeof generateNodeKeyframes>[number], depth: number, count: number): number {
   if (count <= 1) return 0;
+  if (frame.stackOrder !== undefined) return Math.round(frame.stackOrder / 3 * (count - 1));
   const normalized = depth > 0 ? Math.max(0, Math.min(0.999999, (frame.z / depth + 1) / 2)) : 0.5;
   return Math.floor(normalized * count);
 }
@@ -721,6 +744,7 @@ function depthLayerWeight(
   smoothHandoff: boolean,
 ): number {
   const band = depthBand(frame, depth, count);
+  if (frame.stackOrder !== undefined) return band === layer ? 1 : 0;
   if (!smoothHandoff || layer === 0 || band !== layer - 1 || depth <= 0) {
     return band === layer ? 1 : 0;
   }
@@ -749,13 +773,21 @@ type PreparedPropertyTrack = {
 function prepareTransformTracks(
   frames: ReturnType<typeof generateNodeKeyframes>,
   centerOffset: { x: number; y: number },
+  preserveSamples = false,
 ): PreparedPropertyTrack[] {
+  const track = (
+    baseValue: number,
+    value: (frame: ReturnType<typeof generateNodeKeyframes>[number]) => number,
+    tolerance: number,
+  ) => preserveSamples
+    ? sampledFloatTrack(baseValue, frames, value)
+    : sparseFloatTrack(baseValue, frames, value, tolerance);
   return [
-    { name: "TRANSLATION_X", track: sparseFloatTrack(centerOffset.x, frames, (frame) => centerOffset.x + frame.x, 0.75) },
-    { name: "TRANSLATION_Y", track: sparseFloatTrack(centerOffset.y, frames, (frame) => centerOffset.y + frame.y, 0.75) },
-    { name: "SCALE_X", track: sparseFloatTrack(1, frames, (frame) => frame.scaleX, 0.003) },
-    { name: "SCALE_Y", track: sparseFloatTrack(1, frames, (frame) => frame.scaleY, 0.003) },
-    { name: "ROTATION", track: sparseFloatTrack(0, frames, (frame) => frame.rotation, 0.25) },
+    { name: "TRANSLATION_X", track: track(centerOffset.x, (frame) => centerOffset.x + frame.x, 0.75) },
+    { name: "TRANSLATION_Y", track: track(centerOffset.y, (frame) => centerOffset.y + frame.y, 0.75) },
+    { name: "SCALE_X", track: track(1, (frame) => frame.scaleX, 0.003) },
+    { name: "SCALE_Y", track: track(1, (frame) => frame.scaleY, 0.003) },
+    { name: "ROTATION", track: track(0, (frame) => frame.rotation, 0.25) },
   ];
 }
 
@@ -766,6 +798,7 @@ function applyTracks(
   baseOpacity: number,
   opacity: (frame: ReturnType<typeof generateNodeKeyframes>[number]) => number,
   opacityState?: (frame: ReturnType<typeof generateNodeKeyframes>[number]) => boolean,
+  preserveSamples = false,
 ): void {
   for (const prepared of transformTracks) {
     node.applyManualKeyframeTrack(
@@ -775,13 +808,9 @@ function applyTracks(
   }
   node.applyManualKeyframeTrack(
     { type: "PROPERTY", name: "OPACITY" },
-    sparseFloatTrack(
-      baseOpacity,
-      frames,
-      opacity,
-      0.004,
-      opacityState,
-    ),
+    preserveSamples
+      ? sampledFloatTrack(baseOpacity, frames, opacity, opacityState)
+      : sparseFloatTrack(baseOpacity, frames, opacity, 0.004, opacityState),
   );
 }
 
@@ -923,6 +952,7 @@ async function applyMotion(settings: MotionSettings): Promise<void> {
   );
   const layerCount = Math.max(
     configuredLayers,
+    settings.geometry.shape === "falling-stack" ? 4 : 0,
     settings.appearance.farBlur > 0 || settings.appearance.frontShadow > 0 ? 2 : 0,
   );
   const useDepthLayers = layerCount > 1;
@@ -957,7 +987,8 @@ async function applyMotion(settings: MotionSettings): Promise<void> {
     const centerOffset = settings.other.centerBeforeApply
       ? originalCenterOffset
       : { x: 0, y: 0 };
-    const transformTracks = prepareTransformTracks(frames, centerOffset);
+    const preserveSamples = settings.geometry.shape === "falling-stack";
+    const transformTracks = prepareTransformTracks(frames, centerOffset, preserveSamples);
     const baseOpacity = sourceBaseOpacity(node);
     const targetParent = tryGetParent(node);
     const targetParentId = hasSceneChildren(targetParent) ? targetParent.id : null;
@@ -1018,6 +1049,7 @@ async function applyMotion(settings: MotionSettings): Promise<void> {
               settings.appearance.farBlur > 0
                 ? undefined
                 : (frame) => depthBand(frame, fittedSettings.geometry.depth, layerCount) === layer,
+              preserveSamples,
             );
             resolvedCopy.setPluginData(orbitMarkerKey, JSON.stringify({
               version: 2,
@@ -1067,6 +1099,7 @@ async function applyMotion(settings: MotionSettings): Promise<void> {
               ? undefined
               : (frame) => depthBand(frame, fittedSettings.geometry.depth, layerCount) === layerCount - 1
             : undefined,
+          preserveSamples,
         );
         setTimelineDurations(sourceForTracks, settings.motion.duration, touchedTimelines);
 

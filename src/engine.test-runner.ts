@@ -1,6 +1,7 @@
 import {
   depthSplitOpacity,
   fitPreviewFrame,
+  fitPreviewItem,
   fitSettingsToFrame,
   generateNodeKeyframes,
   pointForGeometry,
@@ -22,6 +23,7 @@ const settings: MotionSettings = {
     fullCycle: { type: "easing", duration: 1, ease: [0, 0, 1, 1] },
   },
   geometry: {
+    units: "pixels",
     shape: "parametric",
     dynamicScale: true,
     customPath: "[[0.5,0],[1,0.5],[0.5,1],[0,0.5]]",
@@ -74,8 +76,10 @@ function settingsForPreset(preset: typeof presetOptions[number]["value"]): Motio
   return {
     ...settings,
     preset,
+    motion: { ...settings.motion, ...tuning.motion },
     geometry: { ...settings.geometry, ...tuning.geometry },
     appearance: { ...settings.appearance, ...tuning.appearance },
+    other: { ...settings.other, ...tuning.other },
   };
 }
 
@@ -106,7 +110,7 @@ function trajectoryDistance(left: MotionSettings, right: MotionSettings): number
   return Math.sqrt(squaredDistance / samples);
 }
 
-assert(presetOptions.length === 20, "Expected twenty presets");
+assert(presetOptions.length === 21, "Expected twenty-one presets");
 assert(!presetOptions.some((preset) => String(preset.value) === "tunnel"), "Tunnel preset must not remain in the catalog");
 assert(
   presetOptions.filter((preset) => preset.value.startsWith("orbit-3d")).length === 6,
@@ -119,6 +123,18 @@ assert(
 assert(
   JSON.stringify(parseSettingsJson(serializeSettingsJson(settings), settings)) === JSON.stringify(settings),
   "Settings JSON must round-trip without changing values",
+);
+const legacySettingsJson = JSON.parse(serializeSettingsJson(settings));
+delete legacySettingsJson.geometry.units;
+const migratedLegacySettings = parseSettingsJson(JSON.stringify(legacySettingsJson), {
+  ...settings,
+  geometry: { ...settings.geometry, units: "percent" },
+});
+assert(
+  Math.abs(migratedLegacySettings.geometry.radiusX - 50) < 1e-9 &&
+    Math.abs(migratedLegacySettings.geometry.radiusY - 40) < 1e-9 &&
+    Math.abs(migratedLegacySettings.geometry.depth - 65) < 1e-9,
+  "Legacy pixel settings JSON must migrate to reference percentages",
 );
 assertThrows(
   () => parseSettingsJson('{"preset":"missing"}', settings),
@@ -221,6 +237,118 @@ assert(
   "Vortex must fade smoothly before each item wraps back to its start",
 );
 
+const fallingStackSettings = settingsForPreset("falling-stack");
+const fallingStackCount = 5;
+const fallingStackInterval = 1 / fallingStackCount;
+const fallingStackStart = pointForGeometry(0, fallingStackSettings, 0, fallingStackCount);
+const fallingStackLanded = pointForGeometry(Math.PI * 2 * fallingStackInterval * 0.5, fallingStackSettings, 0, fallingStackCount);
+const fallingStackFront = pointForGeometry(Math.PI * 2 * fallingStackInterval * 0.9, fallingStackSettings, 0, fallingStackCount);
+const fallingStackMiddle = pointForGeometry(Math.PI * 2 * fallingStackInterval * 1.5, fallingStackSettings, 0, fallingStackCount);
+const fallingStackBack = pointForGeometry(Math.PI * 2 * fallingStackInterval * 2.5, fallingStackSettings, 0, fallingStackCount);
+const fallingStackExit = pointForGeometry(Math.PI * 2 * fallingStackInterval * 3.2, fallingStackSettings, 0, fallingStackCount);
+const fallingStackReset = pointForGeometry(Math.PI * 2 * fallingStackInterval * 4.5, fallingStackSettings, 0, fallingStackCount);
+assert(
+  fallingStackStart.opacity === 0 && fallingStackStart.y < fallingStackLanded.y &&
+    fallingStackStart.z === fallingStackLanded.z && fallingStackLanded.opacity > 0.95,
+  "Falling Stack cards must fall onto the top/front of the stack",
+);
+assert(
+  fallingStackFront.y > fallingStackMiddle.y && fallingStackMiddle.y > fallingStackBack.y &&
+    fallingStackFront.scaleX > fallingStackMiddle.scaleX &&
+    fallingStackMiddle.scaleX > fallingStackBack.scaleX,
+  "Falling Stack must push older cards through front, middle, and rear slots",
+);
+assert(
+  fallingStackExit.y < fallingStackBack.y &&
+    fallingStackExit.opacity < fallingStackBack.opacity,
+  "Falling Stack must fade the rear card under the stack",
+);
+assert(
+  fallingStackReset.opacity === 0,
+  "Falling Stack must remain invisible until its next top-card entry",
+);
+const clockwiseStack = generateNodeKeyframes(fallingStackSettings, 1, 5);
+for (const direction of ["clockwise", "counterclockwise"] as const) {
+  const loopSettings = { ...fallingStackSettings, motion: { ...fallingStackSettings.motion, direction } };
+  const tracks = Array.from({ length: 5 }, (_, index) => generateNodeKeyframes(loopSettings, index, 5));
+  for (let incoming = 0; incoming < 5; incoming += 1) {
+    for (const phase of [0.01, 0.1, 0.3]) {
+      const time = (incoming + phase) / 5 * loopSettings.motion.duration;
+      const top = sampleGeneratedKeyframes(tracks[incoming], time, loopSettings.motion.fullCycle);
+      const previous = sampleGeneratedKeyframes(tracks[(incoming + 4) % 5], time, loopSettings.motion.fullCycle);
+      assert(top.stackOrder! > previous.stackOrder!,
+        `Incoming card ${incoming} must be above its predecessor during the entire handoff (${direction})`);
+    }
+  }
+  for (const track of tracks) {
+    for (const key of ["x", "y", "scaleX", "opacity", "stackOrder"] as const) {
+      assert(Math.abs(track[0][key]! - track.at(-1)![key]!) < 1e-8,
+        `Falling Stack loop endpoints must match for ${key}`);
+    }
+  }
+}
+const counterclockwiseStack = generateNodeKeyframes({
+  ...fallingStackSettings,
+  motion: { ...fallingStackSettings.motion, direction: "counterclockwise" },
+}, 1, 5);
+const stackSampleTransition: MotionSettings["motion"]["fullCycle"] = {
+  type: "easing",
+  ease: [0, 0, 1, 1],
+};
+const clockwiseLanding = sampleGeneratedKeyframes(
+  clockwiseStack,
+  fallingStackSettings.motion.duration * 0.9,
+  stackSampleTransition,
+);
+const counterclockwiseLanding = sampleGeneratedKeyframes(
+  counterclockwiseStack,
+  fallingStackSettings.motion.duration * 0.9,
+  stackSampleTransition,
+);
+assert(
+  Math.abs(Math.abs(clockwiseLanding.y) - Math.abs(counterclockwiseLanding.y)) < 1e-6 &&
+    Math.abs(clockwiseLanding.opacity - counterclockwiseLanding.opacity) < 1e-6,
+  "Falling Stack direction must not reverse the falling timeline",
+);
+assert(
+  Math.abs(clockwiseLanding.y + counterclockwiseLanding.y) < 1e-6 &&
+    clockwiseLanding.x === 0 && counterclockwiseLanding.x === 0 &&
+    clockwiseLanding.rotation === 0 && counterclockwiseLanding.rotation === 0,
+  "Falling Stack direction must mirror vertical motion without rotation",
+);
+assert(
+  pointForGeometry(Math.PI, {
+    ...fallingStackSettings,
+    geometry: { ...fallingStackSettings.geometry, rotation: 90 },
+  }, 0, 5).rotation === 0,
+  "Falling Stack must ignore stale rotation settings",
+);
+for (const direction of ["clockwise", "counterclockwise"] as const) {
+  const directionalSettings: MotionSettings = {
+    ...fallingStackSettings,
+    motion: { ...fallingStackSettings.motion, direction },
+  };
+  const tracks = Array.from({ length: 5 }, (_, index) =>
+    generateNodeKeyframes(directionalSettings, index, 5));
+  let minimumVisibleStack = 5;
+  let maximumVisibleStack = 0;
+  for (let step = 0; step < 200; step += 1) {
+    const time = directionalSettings.motion.duration * step / 200;
+    const points = tracks.map((track) => sampleGeneratedKeyframes(
+      track,
+      time,
+      stackSampleTransition,
+    ));
+    const visibleStack = points.filter((point) => point.opacity > 0.05);
+    minimumVisibleStack = Math.min(minimumVisibleStack, visibleStack.length);
+    maximumVisibleStack = Math.max(maximumVisibleStack, visibleStack.length);
+  }
+  assert(
+    minimumVisibleStack >= 2 && maximumVisibleStack <= 4,
+    `Falling Stack ${direction} must maintain a compact two-to-four card stack`,
+  );
+}
+
 const racetrackDefaults = builtInPresetTunings.racetrack.geometry;
 const racetrackLoop = generateNodeKeyframes({
   ...settings,
@@ -265,14 +393,20 @@ assert(
   "Fan direction must mirror its position and rotation",
 );
 
-const sphereSettings = settingsForPreset("orbit-3d-sphere");
+const sphereSettings = fitSettingsToFrame(
+  settingsForPreset("orbit-3d-sphere"),
+  720,
+  400,
+  80,
+  80,
+);
 const spherePoints = Array.from({ length: 9 }, (_, index) =>
   generateNodeKeyframes(sphereSettings, index, 9)[0]);
 assert(
   new Set(spherePoints.map((point) => point.y.toFixed(3))).size === 9,
   "Sphere layers must be distributed across distinct latitudes",
 );
-const sphereRadius = Math.min(settings.geometry.radiusX, settings.geometry.radiusY);
+const sphereRadius = Math.min(sphereSettings.geometry.radiusX, sphereSettings.geometry.radiusY);
 const sphereDepth = sphereSettings.geometry.depth;
 assert(
   spherePoints.every((point) => Math.abs(
@@ -408,7 +542,7 @@ const rotatedBoundsX = Math.hypot(
   fittedRotatedCircle.geometry.radiusY / Math.sqrt(2),
 );
 assert(
-  rotatedBoundsX <= 55.6 + 1e-6,
+  rotatedBoundsX <= (240 - 80 * fittedRotatedCircle.appearance.nearScale) / 2 - 4.8 + 1e-6,
   "Dynamic scale must keep a rotated circle inside the selected frame",
 );
 const manualGeometry = fitSettingsToFrame({
@@ -420,6 +554,38 @@ assert(
   "Manual radii must be preserved when Dynamic Scale is disabled",
 );
 
+const largeCardStack = fitSettingsToFrame(
+  settingsForPreset("falling-stack"),
+  3987,
+  2813,
+  1908,
+  1908,
+);
+const largeCardBack = pointForGeometry(0, largeCardStack, 0, 5);
+assert(
+  Math.abs(largeCardBack.y) > 350,
+  "Falling Stack must remain visible when cards occupy most of the frame",
+);
+assert(
+  1908 * largeCardStack.appearance.nearScale + Math.abs(largeCardBack.y) * 2 <= 2813 + 1e-6,
+  "Falling Stack must reserve enough room for large-card vertical travel",
+);
+const smallCardStack = fitSettingsToFrame(
+  settingsForPreset("falling-stack"),
+  400,
+  300,
+  100,
+  100,
+);
+const smallCardBack = pointForGeometry(0, smallCardStack, 0, 5);
+assert(
+  Math.abs(
+    Math.abs(largeCardBack.y) / (1908 * largeCardStack.appearance.nearScale) -
+    Math.abs(smallCardBack.y) / (100 * smallCardStack.appearance.nearScale)
+  ) < 1e-9,
+  "Falling Stack travel must use the same card-height percentage at every size",
+);
+
 const widePreview = fitPreviewFrame(1600, 900);
 assert(
   Math.abs(widePreview.width - 300) < 1e-9 && Math.abs(widePreview.height - 168.75) < 1e-9,
@@ -429,6 +595,16 @@ const tallPreview = fitPreviewFrame(400, 800);
 assert(
   Math.abs(tallPreview.width - 110) < 1e-9 && Math.abs(tallPreview.height - 220) < 1e-9,
   "Tall previews must preserve frame proportions within the height limit",
+);
+const squareThumbnail = fitPreviewItem(1908, 1908, 0.05, 18, 24);
+assert(
+  squareThumbnail.width === 18 && squareThumbnail.height === 18,
+  "Large square cards must remain square in preset thumbnails",
+);
+const wideThumbnail = fitPreviewItem(1908, 954, 0.05, 18, 24);
+assert(
+  Math.abs(wideThumbnail.width / wideThumbnail.height - 2) < 1e-9,
+  "Preset thumbnails must preserve source-card aspect ratios",
 );
 
 for (const preset of presetOptions) {
@@ -459,6 +635,22 @@ for (const preset of presetOptions) {
   const xRange = Math.max(...sampledPoints.map((point) => point.x)) - Math.min(...sampledPoints.map((point) => point.x));
   const yRange = Math.max(...sampledPoints.map((point) => point.y)) - Math.min(...sampledPoints.map((point) => point.y));
   assert(xRange > 1 || yRange > 1, `${preset.label} must produce visible movement`);
+
+  const smallResponsive = fitSettingsToFrame(presetSettings, 720, 400, 80, 100);
+  const largeResponsive = fitSettingsToFrame(presetSettings, 1440, 800, 160, 200);
+  for (let step = 0; step < 16; step += 1) {
+    const angle = step / 16 * Math.PI * 2;
+    const smallPoint = pointForGeometry(angle, smallResponsive, 2, 7);
+    const largePoint = pointForGeometry(angle, largeResponsive, 2, 7);
+    assert(
+      Math.abs(largePoint.x - smallPoint.x * 2) < 1e-5 &&
+        Math.abs(largePoint.y - smallPoint.y * 2) < 1e-5 &&
+        Math.abs(largePoint.z - smallPoint.z * 2) < 1e-5 &&
+        Math.abs(largePoint.scaleX - smallPoint.scaleX) < 1e-9 &&
+        Math.abs(largePoint.opacity - smallPoint.opacity) < 1e-9,
+      `${preset.label} must preserve its normalized motion when the frame doubles`,
+    );
+  }
 }
 
 console.log("Orbit engine: all checks passed");

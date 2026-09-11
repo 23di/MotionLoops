@@ -1,6 +1,6 @@
 // @ts-nocheck
 import assert from "node:assert/strict";
-import { depthSplitOpacity, generateNodeKeyframes } from "./engine";
+import { depthSplitOpacity, fitSettingsToFrame, generateNodeKeyframes, pointForGeometry } from "./engine";
 import { builtInPresetTunings } from "./presets";
 import { presetOptions, type MotionSettings } from "./types";
 
@@ -153,6 +153,7 @@ const settings: MotionSettings = {
     fullCycle: { type: "easing", duration: 1, ease: [0, 0, 1, 1] },
   },
   geometry: {
+    units: "pixels",
     shape: "parametric",
     dynamicScale: false,
     customPath: "[[0,0.5],[1,0.5]]",
@@ -716,6 +717,7 @@ for (const service of servicesBeforeCatalogWalk) {
 for (const preset of presetOptions) {
   const tuning = builtInPresetTunings[preset.value];
   settings.preset = preset.value;
+  Object.assign(settings.motion, tuning.motion);
   Object.assign(settings.geometry, tuning.geometry);
   Object.assign(settings.appearance, tuning.appearance);
   Object.assign(settings.other, tuning.other);
@@ -723,17 +725,62 @@ for (const preset of presetOptions) {
   const services = parent.children.filter((node) =>
     / \u00b7 Orbit Depth \d+ \(service\)$/.test(node.name)
   );
+  const expectedServiceCount = Math.max(0, Number(settings.other.serviceLayers) - 1) * 2;
   assert.equal(
     services.length,
-    2,
-    `${preset.label}: walking the entire preset catalog must keep exactly one service per source`,
+    expectedServiceCount,
+    `${preset.label}: walking the entire preset catalog must keep the configured services per source`,
   );
-  assert.equal(new Set(services.map((node) => node.id)).size, 2, `${preset.label}: service ids must stay unique`);
+  assert.equal(
+    new Set(services.map((node) => node.id)).size,
+    expectedServiceCount,
+    `${preset.label}: service ids must stay unique`,
+  );
+  if (preset.value === "falling-stack") {
+    for (const field of ["TRANSLATION_X", "TRANSLATION_Y", "SCALE_X", "SCALE_Y", "ROTATION"]) {
+      const track = source.manualKeyframeTracks[field] as any;
+      assert(track.keyframes.length <= 32, `Falling Stack ${field} must export compact curves, got ${track.keyframes.length}`);
+      if (field === "TRANSLATION_X" || field === "ROTATION") {
+        assert.equal(track.keyframes.length, 2, `Constant ${field} needs only loop endpoints`);
+      }
+    }
+  }
 }
 await onMessage({ type: "clear", scope: "selection" });
 assert.equal(parent.children.length, 2, "Parent Clear must leave only the two original sources");
 assert.equal(Object.keys(source.manualKeyframeTracks).length, 0);
 assert.equal(Object.keys(secondSource.manualKeyframeTracks).length, 0);
+
+const stackCards = Array.from({ length: 5 }, (_, index) => makeNode(`Stack ${index}`));
+for (const card of stackCards) parent.insertChild(parent.children.length, card);
+globalThis.figma.currentPage.selection = stackCards;
+const stackSettings = structuredClone(settings);
+stackSettings.preset = "falling-stack";
+Object.assign(stackSettings.geometry, builtInPresetTunings["falling-stack"].geometry);
+Object.assign(stackSettings.appearance, builtInPresetTunings["falling-stack"].appearance);
+Object.assign(stackSettings.other, { serviceLayers: "4", scope: "selection", centerBeforeApply: true });
+stackSettings.motion.fullCycle = { type: "easing", ease: [0, 0, 1, 1] };
+const fittedStack = fitSettingsToFrame(stackSettings, 720, 400, 80, 100);
+for (const direction of ["clockwise", "counterclockwise"]) {
+  stackSettings.motion.direction = direction;
+  fittedStack.motion.direction = direction;
+  await onMessage({ type: "apply", settings: stackSettings });
+  for (const [index, card] of stackCards.entries()) {
+    const tracks = card.manualKeyframeTracks;
+    for (const field of ["TRANSLATION_Y", "SCALE_X", "SCALE_Y", "OPACITY"]) {
+      assert(tracks[field].keyframes.length <= 20, `${field}: expected at most 20 keys, got ${tracks[field].keyframes.length}`);
+    }
+    for (let sample = 0; sample < 1000; sample += 1) {
+      const progress = (sample + 0.5) / 1000;
+      const time = progress * stackSettings.motion.duration;
+      const expected = pointForGeometry((progress - index / 5) * Math.PI * 2, fittedStack, index, 5);
+      assert(Math.abs(sampleTrack(tracks.TRANSLATION_Y, time) - expected.y) < 0.01, "Sparse stack translation must match the continuous motion");
+      assert(Math.abs(sampleTrack(tracks.SCALE_X, time) - expected.scaleX) < 0.0001, "Sparse stack scale must match the continuous motion");
+      const expectedFrontOpacity = expected.stackOrder === 3 ? expected.opacity : 0;
+      assert(Math.abs(sampleTrack(tracks.OPACITY, time) - expectedFrontOpacity) < 0.0001, "Sparse stack must preserve front-layer handoffs, including 5→1");
+    }
+  }
+}
 
 globalThis.figma.currentPage.selection = [];
 await onMessage({ type: "apply", settings });

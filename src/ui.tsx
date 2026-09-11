@@ -6,6 +6,7 @@ import "dialkit/styles.css";
 import "./styles.css";
 import {
   fitPreviewFrame,
+  fitPreviewItem,
   fitSettingsToFrame,
   generateNodeKeyframes,
   sampleGeneratedKeyframes,
@@ -13,7 +14,7 @@ import {
   supportsPathGeometry,
 } from "./engine";
 import { builtInPresetTunings } from "./presets";
-import { parseSettingsJson, serializeSettingsJson } from "./settings-json";
+import { migrateSettingsToPercent, parseSettingsJson, serializeSettingsJson } from "./settings-json";
 import {
   presetOptions,
   type DialTransition,
@@ -74,6 +75,11 @@ const controls = {
   },
   geometry: {
     _collapsed: true,
+    units: {
+      type: "select",
+      options: [{ value: "percent", label: "Percent" }],
+      default: "percent",
+    },
     shape: {
       type: "select",
       options: [
@@ -83,6 +89,7 @@ const controls = {
         { value: "sphere", label: "Sphere" },
         { value: "deck", label: "Deck" },
         { value: "shuffle", label: "Shuffle" },
+        { value: "falling-stack", label: "Falling stack" },
         { value: "tunnel", label: "Tunnel" },
         { value: "cylinder", label: "Cylinder" },
         { value: "racetrack", label: "Racetrack" },
@@ -98,10 +105,10 @@ const controls = {
       default: "[[0.04,0.68],[0.22,0.36],[0.48,0.48],[0.72,0.68],[0.96,0.34]]",
     },
     dynamicScale: true,
-    radiusX: [360, 0, 1200, 10],
-    radiusY: [160, 0, 800, 10],
+    radiusX: [50, 0, 100, 1],
+    radiusY: [40, 0, 100, 1],
     circleRotation: [0, -180, 180, 1],
-    depth: [260, 0, 800, 10],
+    depth: [65, 0, 200, 1],
     tilt: [28, -90, 90, 1],
     turns: [1, 0.25, 4, 0.25],
     rotation: [0, -180, 180, 1],
@@ -194,12 +201,56 @@ const controls = {
   },
 } satisfies DialConfig;
 
-const panelId = "orbit-motion-controls-v6";
+const panelId = "orbit-motion-controls-v7";
+const legacyPanelId = "orbit-motion-controls-v6";
 const internalKeyframeSamples = 32;
 
 const builtInPresetSchemaKey = "orbit-built-in-preset-schema";
-const builtInPresetSchemaVersion = "11";
+const builtInPresetSchemaVersion = "14";
 let builtInPresetSchemaMigratedInSession = false;
+
+function migrateLegacyDialkitStorage(): void {
+  try {
+    const currentKey = `dialkit:${panelId}`;
+    if (window.localStorage.getItem(currentKey)) return;
+    const raw = window.localStorage.getItem(`dialkit:${legacyPanelId}`);
+    if (!raw) return;
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    if (!parsed || parsed.version !== 1) return;
+
+    const convertValues = (input: unknown): unknown => {
+      if (!input || typeof input !== "object" || Array.isArray(input)) return input;
+      const values = { ...(input as Record<string, unknown>) };
+      if (values["geometry.units"] === "percent") return values;
+      const radiusX = values["geometry.radiusX"];
+      const radiusY = values["geometry.radiusY"];
+      const depth = values["geometry.depth"];
+      values["geometry.units"] = "percent";
+      if (typeof radiusX === "number") values["geometry.radiusX"] = radiusX / 7.2;
+      if (typeof radiusY === "number") values["geometry.radiusY"] = radiusY / 4;
+      if (typeof depth === "number") values["geometry.depth"] = depth / 4;
+      return values;
+    };
+
+    const presets = Array.isArray(parsed.presets)
+      ? parsed.presets.map((preset) => {
+          if (!preset || typeof preset !== "object" || Array.isArray(preset)) return preset;
+          const record = preset as Record<string, unknown>;
+          return { ...record, values: convertValues(record.values) };
+        })
+      : parsed.presets;
+    window.localStorage.setItem(currentKey, JSON.stringify({
+      ...parsed,
+      values: convertValues(parsed.values),
+      baseValues: convertValues(parsed.baseValues),
+      presets,
+    }));
+  } catch {
+    // Start clean if persisted state is unavailable or malformed.
+  }
+}
+
+migrateLegacyDialkitStorage();
 
 function shouldMigrateBuiltInPresets(): boolean {
   if (builtInPresetSchemaMigratedInSession) return false;
@@ -222,6 +273,9 @@ function markBuiltInPresetsMigrated(): void {
 function applyBuiltInPresetTuning(preset: PresetId): void {
   DialStore.updateValue(panelId, "preset", preset);
   const tuning = builtInPresetTunings[preset];
+  for (const [key, value] of Object.entries(tuning.motion ?? {})) {
+    if (key !== "keyframes") DialStore.updateValue(panelId, `motion.${key}`, value as never);
+  }
   for (const [key, value] of Object.entries(tuning.geometry ?? {})) {
     const path = advancedGeometryKeySet.has(key)
       ? `geometry.advanced.${key}`
@@ -527,10 +581,10 @@ function GeometryPathEditor({ settings, target }: { settings: MotionSettings; ta
       const localY = dx * Math.sin(radians) + dy * Math.cos(radians);
       if (activeHandle.current === "x") {
         const normalized = Math.abs(localX) / bounds.width;
-        DialStore.updateValue(panelId, "geometry.radiusX", Math.round(normalized * frameWidth / 10) * 10);
+        DialStore.updateValue(panelId, "geometry.radiusX", Math.round(normalized * 100));
       } else {
         const normalized = Math.abs(localY) / bounds.height;
-        DialStore.updateValue(panelId, "geometry.radiusY", Math.round(normalized * frameHeight / 10) * 10);
+        DialStore.updateValue(panelId, "geometry.radiusY", Math.round(normalized * 100));
       }
       return;
     }
@@ -709,6 +763,7 @@ function OrbitPreview({
     const configuredLayers = Number(settings.other.serviceLayers ?? (settings.other.depthSplit === false ? "0" : "2"));
     const layerCount = Math.max(
       configuredLayers,
+      settings.geometry.shape === "falling-stack" ? 4 : 0,
       settings.appearance.farBlur > 0 || settings.appearance.frontShadow > 0 ? 2 : 0,
     );
     const layers = layerCount > 1 ? Array.from({ length: layerCount }, (_, layer) => layer) : [-1];
@@ -724,7 +779,9 @@ function OrbitPreview({
         const normalizedDepth = fittedSettings.geometry.depth > 0
           ? Math.max(0, Math.min(0.999999, (point.z / fittedSettings.geometry.depth + 1) / 2))
           : 0.5;
-        point.opacity = Math.floor(normalizedDepth * layerCount) === layer ? point.opacity : 0;
+        const band = point.stackOrder === undefined ? Math.floor(normalizedDepth * layerCount)
+          : Math.round(point.stackOrder / 3 * (layerCount - 1));
+        point.opacity = band === layer ? point.opacity : 0;
       }
       return {
         index,
@@ -820,6 +877,7 @@ function settingsForPreset(settings: MotionSettings, preset: PresetId): MotionSe
   return {
     ...settings,
     preset,
+    motion: { ...settings.motion, ...tuning.motion },
     geometry: { ...settings.geometry, ...tuning.geometry },
     appearance: { ...settings.appearance, ...tuning.appearance },
     other: { ...settings.other, ...tuning.other },
@@ -835,7 +893,7 @@ function PresetThumbnail({
   target: TargetPreview;
   time: number;
 }) {
-  const itemCount = Math.max(target.count, 9);
+  const itemCount = target.count > 0 ? target.count : 9;
   const drawCount = Math.min(itemCount, 9);
   const frameWidth = target.frameWidth || 720;
   const frameHeight = target.frameHeight || 400;
@@ -844,11 +902,12 @@ function PresetThumbnail({
     Array.from({ length: drawCount }, (_, index) => {
       const source = target.items[index] ?? { width: 72, height: 92, offsetX: 0, offsetY: 0 };
       const fitted = fitSettingsToFrame(settings, frameWidth, frameHeight, source.width, source.height);
+      const thumbnailSize = fitPreviewItem(source.width, source.height, previewScale, 18, 24);
       return {
         index,
         frames: generateNodeKeyframes(fitted, index, itemCount),
-        width: Math.max(6, Math.min(18, source.width * previewScale)),
-        height: Math.max(8, Math.min(24, source.height * previewScale)),
+        width: thumbnailSize.width,
+        height: thumbnailSize.height,
       };
     })
   ), [drawCount, frameHeight, frameWidth, itemCount, previewScale, settings, target.items]);
@@ -880,7 +939,7 @@ function PresetThumbnail({
             boxShadow: settings.appearance.frontShadow > 0 && point.z >= 0
               ? `0 ${settings.appearance.frontShadow * previewScale * .5}px ${settings.appearance.frontShadow * previewScale}px rgba(0,0,0,.3)`
               : undefined,
-            zIndex: index,
+            zIndex: point.stackOrder === undefined ? index : point.stackOrder * drawCount + index,
             transform: `translate3d(${point.x * previewScale}px, ${point.y * previewScale}px, 0) rotate(${point.rotation}deg) scale(${point.scaleX}, ${point.scaleY})`,
           }}
         />
@@ -1288,6 +1347,12 @@ function App() {
       document.querySelectorAll<HTMLElement>(".dialkit-labeled-control-label").forEach((label) => {
         if (label.textContent?.trim() === "Orient3d") label.textContent = "3D orientation";
       });
+      document.querySelectorAll<HTMLElement>(".dialkit-slider-label").forEach((label) => {
+        const text = label.textContent?.trim();
+        if (text === "Radius X") label.textContent = "Radius X (%)";
+        if (text === "Radius Y") label.textContent = "Radius Y (%)";
+        if (text === "Depth") label.textContent = "Depth (%)";
+      });
 
 
       const fullCycleContent = fullCycleFolder?.querySelector<HTMLElement>(".dialkit-folder-inner > div");
@@ -1305,6 +1370,10 @@ function App() {
       const shapeRow = Array.from(
         geometryFolder?.querySelectorAll<HTMLElement>(".dialkit-select-row") ?? [],
       ).find((row) => row.querySelector(".dialkit-select-label")?.textContent?.trim() === "Shape");
+      const unitsRow = Array.from(
+        geometryFolder?.querySelectorAll<HTMLElement>(".dialkit-select-row") ?? [],
+      ).find((row) => row.querySelector(".dialkit-select-label")?.textContent?.trim() === "Units");
+      unitsRow?.classList.add("orbit-control-hidden");
       if (shapeRow) {
         let host = shapeRow.nextElementSibling as HTMLElement | null;
         if (!host?.classList.contains("orbit-path-portal")) {
@@ -1378,7 +1447,7 @@ function App() {
       effectiveValues.geometry.shape === "custom-path";
     const shapeAmount = ["deck", "shuffle", "tunnel", "cylinder", "racetrack", "fan", "pendulum", "vortex", "focus-deck"]
       .includes(effectiveValues.geometry.shape);
-    const itemSpread = ["deck", "shuffle", "cylinder", "fan", "pendulum", "focus-deck"]
+    const itemSpread = ["deck", "shuffle", "falling-stack", "cylinder", "fan", "pendulum", "focus-deck"]
       .includes(effectiveValues.geometry.shape);
     const depthFalloff = effectiveValues.geometry.shape === "deck" || effectiveValues.geometry.shape === "focus-deck";
     document.querySelectorAll<HTMLElement>(".dialkit-select-row").forEach((row) => {
@@ -1429,7 +1498,7 @@ function App() {
         );
         return;
       }
-      if (label === "Radius X" || label === "Radius Y") {
+      if (label?.startsWith("Radius X") || label?.startsWith("Radius Y")) {
         wrapper.classList.toggle("orbit-control-hidden", disabled);
         wrapper.inert = disabled;
         wrapper.setAttribute("aria-disabled", String(disabled));
@@ -1450,7 +1519,14 @@ function App() {
         if (!initialSelectionHandled.current) {
           initialSelectionHandled.current = true;
           if (message.selection.appliedSettings) {
-            const restored = message.selection.appliedSettings;
+            const restoredTarget = message.selection.targets[
+              message.selection.appliedSettings.other.scope
+            ];
+            const restored = migrateSettingsToPercent(
+              message.selection.appliedSettings,
+              restoredTarget.frameWidth,
+              restoredTarget.frameHeight,
+            );
             DialStore.clearActivePreset(panelId);
             DialStore.updateValue(panelId, "preset", restored.preset);
             for (const [key, value] of Object.entries(restored.motion)) {
@@ -1527,7 +1603,12 @@ function App() {
     try {
       if (!navigator.clipboard?.readText) throw new Error("Clipboard access is unavailable in this Figma version.");
       const text = await navigator.clipboard.readText();
-      const imported = parseSettingsJson(text, effectiveValues);
+      const parsed = parseSettingsJson(text, effectiveValues);
+      const imported = migrateSettingsToPercent(
+        parsed,
+        activeTarget.frameWidth,
+        activeTarget.frameHeight,
+      );
       applySettingsToStore(imported);
       setStatus({ kind: "success", message: "Settings JSON pasted." });
     } catch (error) {
@@ -1611,7 +1692,7 @@ function App() {
         {settingsJsonPortalHost && createPortal(
           <div className="orbit-settings-json-actions" role="group" aria-label="Settings JSON">
             <button className="dialkit-action-button" type="button" onClick={copySettingsJson}>Copy JSON</button>
-            <button className="dialkit-action-button" type="button" onClick={pasteSettingsJson}>Paste JSON</button>
+            <button className="dialkit-action-button" type="button" onClick={pasteSettingsJson} aria-label="Paste settings JSON">Paste</button>
           </div>,
           settingsJsonPortalHost,
         )}
