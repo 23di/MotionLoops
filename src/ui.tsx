@@ -1,21 +1,22 @@
 import { StrictMode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { createPortal } from "react-dom";
-import { DialStore, useDialKit, type DialConfig } from "dialkit";
+import { DialStore, useDialKit } from "dialkit";
+import { motionControls as controls, toMotionDocument, fromMotionDocument, documentValues, documentFromValues } from "./motion-system";
 import "dialkit/styles.css";
 import "./styles.css";
 import {
   fitPreviewFrame,
-  fitPreviewItem,
   fitSettingsToFrame,
   generateNodeKeyframes,
   sampleGeneratedKeyframes,
   supportsOrbitOrientation,
   supportsPathGeometry,
 } from "./engine";
-import { builtInPresetTunings } from "./presets";
-import { families, freshPreset } from "./catalog";
+import { families, freshPreset, familyFor, motionFingerprint, settingsFromSaved } from "./catalog";
 import { PresetEditor } from "./preset-editor";
+import { referenceDefinition, activeReferencePresets } from "./reference-catalog";
+import { referenceScene } from "./reference-engine";
 import { migrateSettingsToPercent, parseSettingsJson, serializeSettingsJson } from "./settings-json";
 import {
   presetOptions,
@@ -28,210 +29,28 @@ import {
   type UiToPluginMessage,
 } from "./types";
 
-const advancedGeometryKeys = [
-  "xWave",
-  "yWave",
-  "depthWave",
-  "xFrequency",
-  "yFrequency",
-  "depthFrequency",
-  "xAmplitude",
-  "yAmplitude",
-  "depthAmplitude",
-  "xPhase",
-  "yPhase",
-  "depthPhase",
-  "yOffset",
-] as const satisfies ReadonlyArray<keyof MotionSettings["geometry"]>;
-type AdvancedGeometryKey = typeof advancedGeometryKeys[number];
-type UiSettings = Omit<MotionSettings, "geometry"> & {
-  geometry: Omit<MotionSettings["geometry"], AdvancedGeometryKey> & {
-    advanced: Pick<MotionSettings["geometry"], AdvancedGeometryKey>;
-  };
-};
-const advancedGeometryKeySet = new Set<string>(advancedGeometryKeys);
-
-const controls = {
-  preset: {
-    type: "select",
-    options: presetOptions.map((preset) => ({ value: preset.value, label: preset.label })),
-    default: "orbit-3d-ring",
-  },
-  motion: {
-    _collapsed: true,
-    duration: [5, 0.4, 12, 0.1],
-    stagger: [0, 0, 1.5, 0.01],
-    direction: {
-      type: "select",
-      options: [
-        { value: "clockwise", label: "Clockwise" },
-        { value: "counterclockwise", label: "Counterclockwise" },
-      ],
-      default: "clockwise",
-    },
-    fullCycle: {
-      type: "easing",
-      duration: 1,
-      ease: [0, 0, 1, 1],
-    },
-  },
-  geometry: {
-    _collapsed: true,
-    units: {
-      type: "select",
-      options: [{ value: "percent", label: "Percent" }],
-      default: "percent",
-    },
-    shape: {
-      type: "select",
-      options: [
-        { value: "ellipse", label: "Ellipse" },
-        { value: "custom-path", label: "Custom path" },
-        { value: "parametric", label: "Parametric" },
-        { value: "sphere", label: "Sphere" },
-        { value: "deck", label: "Deck" },
-        { value: "shuffle", label: "Shuffle" },
-        { value: "falling-stack", label: "Falling stack" },
-        { value: "tunnel", label: "Tunnel" },
-        { value: "cylinder", label: "Cylinder" },
-        { value: "racetrack", label: "Racetrack" },
-        { value: "focus-deck", label: "Focus deck" },
-        { value: "fan", label: "Fan" },
-        { value: "pendulum", label: "Pendulum" },
-        { value: "vortex", label: "Vortex" },
-      ],
-      default: "parametric",
-    },
-    customPath: {
-      type: "text",
-      default: "[[0.04,0.68],[0.22,0.36],[0.48,0.48],[0.72,0.68],[0.96,0.34]]",
-    },
-    dynamicScale: true,
-    radiusX: [50, 0, 100, 1],
-    radiusY: [40, 0, 100, 1],
-    circleRotation: [0, -180, 180, 1],
-    depth: [65, 0, 200, 1],
-    tilt: [28, -90, 90, 1],
-    turns: [1, 0.25, 4, 0.25],
-    rotation: [0, -180, 180, 1],
-    orient3d: true,
-    shapeAmount: [1, 0, 2, 0.05],
-    itemSpread: [1, 0, 3, 0.05],
-    depthFalloff: [1, 0.1, 4, 0.05],
-    advanced: {
-      _collapsed: true,
-      xWave: {
-        type: "select",
-        options: [{ value: "cos", label: "Cosine" }, { value: "sin", label: "Sine" }],
-        default: "cos",
-      },
-      yWave: {
-        type: "select",
-        options: [{ value: "sin", label: "Sine" }, { value: "cos", label: "Cosine" }],
-        default: "sin",
-      },
-      depthWave: {
-        type: "select",
-        options: [{ value: "sin", label: "Sine" }, { value: "cos", label: "Cosine" }],
-        default: "sin",
-      },
-      xFrequency: [1, 0, 8, 0.25],
-      yFrequency: [1, 0, 8, 0.25],
-      depthFrequency: [1, 0, 8, 0.25],
-      xAmplitude: [1, -2, 2, 0.05],
-      yAmplitude: [1, -2, 2, 0.05],
-      depthAmplitude: [1, -2, 2, 0.05],
-      xPhase: [0, -180, 180, 1],
-      yPhase: [0, -180, 180, 1],
-      depthPhase: [0, -180, 180, 1],
-      yOffset: [0, -2, 2, 0.05],
-    },
-  },
-  appearance: {
-    _collapsed: true,
-    nearScale: [1.25, 0.1, 3, 0.05],
-    farScale: [0.55, 0.05, 2, 0.05],
-    farOpacity: [0.28, 0, 1, 0.01],
-    fadeStart: [0, 0, 100, 1],
-    fadeEnd: [100, 0, 100, 1],
-    opacityCurve: {
-      type: "select",
-      options: [
-        { value: "linear", label: "Linear" },
-        { value: "early", label: "Early fade" },
-        { value: "late", label: "Late fade" },
-        { value: "soft", label: "Soft" },
-        { value: "sharp", label: "Sharp" },
-      ],
-      default: "linear",
-    },
-    farBlur: [0, 0, 40, 1],
-    frontShadow: [0, 0, 40, 1],
-    facePath: false,
-  },
-  other: {
-    _collapsed: true,
-    centerBeforeApply: true,
-    serviceLayers: {
-      type: "select",
-      options: [
-        { value: "0", label: "Off" },
-        { value: "2", label: "2" },
-        { value: "3", label: "3" },
-        { value: "4", label: "4" },
-        { value: "5", label: "5+" },
-      ],
-      default: "2",
-    },
-    scope: {
-      type: "select",
-      options: [
-        { value: "selection", label: "Selected layers" },
-        { value: "children", label: "Frame children" },
-        { value: "deep", label: "Deep descendants" },
-      ],
-      default: "selection",
-    },
-    settingsJson: {
-      type: "action",
-      label: "Settings JSON",
-    },
-    resetSettings: {
-      type: "action",
-      label: "Reset settings",
-    },
-  },
-} satisfies DialConfig;
-
-const panelId = "orbit-motion-controls-v7";
-const legacyPanelId = "orbit-motion-controls-v6";
-const internalKeyframeSamples = 32;
+const panelId = "orbit-motion-controls-v8";
+const legacyPanelId = "orbit-motion-controls-v7";
 
 const builtInPresetSchemaKey = "orbit-built-in-preset-schema";
-const builtInPresetSchemaVersion = "14";
+const builtInPresetSchemaVersion = "21";
 let builtInPresetSchemaMigratedInSession = false;
 
 function migrateLegacyDialkitStorage(): void {
   try {
     const currentKey = `dialkit:${panelId}`;
     if (window.localStorage.getItem(currentKey)) return;
-    const raw = window.localStorage.getItem(`dialkit:${legacyPanelId}`);
+    const raw = window.localStorage.getItem(`dialkit:${legacyPanelId}`) ?? window.localStorage.getItem("dialkit:orbit-motion-controls-v6");
     if (!raw) return;
     const parsed = JSON.parse(raw) as Record<string, unknown>;
     if (!parsed || parsed.version !== 1) return;
 
     const convertValues = (input: unknown): unknown => {
       if (!input || typeof input !== "object" || Array.isArray(input)) return input;
-      const values = { ...(input as Record<string, unknown>) };
-      if (values["geometry.units"] === "percent") return values;
-      const radiusX = values["geometry.radiusX"];
-      const radiusY = values["geometry.radiusY"];
-      const depth = values["geometry.depth"];
-      values["geometry.units"] = "percent";
-      if (typeof radiusX === "number") values["geometry.radiusX"] = radiusX / 7.2;
-      if (typeof radiusY === "number") values["geometry.radiusY"] = radiusY / 4;
-      if (typeof depth === "number") values["geometry.depth"] = depth / 4;
-      return values;
+      const values = input as Record<string,unknown>;
+      const id=(values.preset??"circle") as PresetId;
+      const settings=settingsFromSaved(values,freshPreset(id));
+      return documentValues(toMotionDocument(migrateSettingsToPercent(settings)));
     };
 
     const presets = Array.isArray(parsed.presets)
@@ -272,44 +91,22 @@ function markBuiltInPresetsMigrated(): void {
   }
 }
 
-function applyBuiltInPresetTuning(preset: PresetId): void {
-  DialStore.updateValue(panelId, "preset", preset);
-  const tuning = builtInPresetTunings[preset];
-  for (const [key, value] of Object.entries(tuning.motion ?? {})) {
-    if (key !== "keyframes") DialStore.updateValue(panelId, `motion.${key}`, value as never);
-  }
-  for (const [key, value] of Object.entries(tuning.geometry ?? {})) {
-    const path = advancedGeometryKeySet.has(key)
-      ? `geometry.advanced.${key}`
-      : `geometry.${key}`;
-    DialStore.updateValue(panelId, path, value as number | string | boolean);
-  }
-  for (const [key, value] of Object.entries(tuning.appearance ?? {})) {
-    DialStore.updateValue(panelId, `appearance.${key}`, value as number | string | boolean);
-  }
-  for (const [key, value] of Object.entries(tuning.other ?? {})) {
-    DialStore.updateValue(panelId, `other.${key}`, value as number | string | boolean);
-  }
+function applyBuiltInPresetTuning(preset:PresetId):void {
+  applySettingsToStore(freshPreset(preset));
 }
 
-function applySettingsToStore(settings: MotionSettings): void {
+function applySettingsToStore(settings:MotionSettings):void {
   DialStore.clearActivePreset(panelId);
-  DialStore.updateValue(panelId, "preset", settings.preset);
-  for (const [key, value] of Object.entries(settings.motion)) {
-    if (key !== "keyframes") DialStore.updateValue(panelId, `motion.${key}`, value as never);
-  }
-  for (const [key, value] of Object.entries(settings.geometry)) {
-    const path = advancedGeometryKeySet.has(key)
-      ? `geometry.advanced.${key}`
-      : `geometry.${key}`;
-    DialStore.updateValue(panelId, path, value as never);
-  }
-  for (const [key, value] of Object.entries(settings.appearance)) {
-    DialStore.updateValue(panelId, `appearance.${key}`, value as never);
-  }
-  for (const [key, value] of Object.entries(settings.other)) {
-    DialStore.updateValue(panelId, `other.${key}`, value as never);
-  }
+  DialStore.updateValues(panelId,documentValues(toMotionDocument(settings)) as never);
+}
+
+function updateLegacyValue(path:string,value:unknown):void {
+  const settings=fromMotionDocument(documentFromValues(DialStore.getValues(panelId)));
+  const parts=path.replace(".advanced.",".").split("."),key=parts.pop()!;
+  let cursor:any=settings;
+  for(const part of parts)cursor=cursor[part];
+  cursor[key]=value;
+  applySettingsToStore(settings);
 }
 
 async function writeClipboardText(text: string): Promise<void> {
@@ -329,12 +126,6 @@ async function writeClipboardText(text: string): Promise<void> {
     if (!copied) throw new Error("Clipboard access is unavailable.");
   }
 }
-
-const libraryLinks = [
-  { label: "DialKit · MIT", href: "https://www.dialkit.dev/" },
-  { label: "React · MIT", href: "https://react.dev/" },
-  { label: "Motion · MIT", href: "https://motion.dev/" },
-] as const;
 
 const cycleEasingPresets = {
   linear: [0, 0, 1, 1],
@@ -405,7 +196,7 @@ function EasingPresetManager({ transition }: { transition: DialTransition }) {
   const applyPreset = (id: string) => {
     const preset = presets.find((item) => item.id === id);
     if (!preset) return;
-    DialStore.updateValue(panelId, "motion.fullCycle", {
+    updateLegacyValue("motion.fullCycle", {
       type: "easing",
       duration: transition.type === "easing" ? transition.duration ?? 1 : 1,
       ease: [...preset.ease],
@@ -507,8 +298,8 @@ function GeometryPathEditor({ settings, target }: { settings: MotionSettings; ta
   const radiusX = fitted.geometry.radiusX / frameWidth * viewWidth;
   const radiusY = fitted.geometry.radiusY / frameHeight * viewHeight;
   const circleRotation = settings.geometry.circleRotation ?? 0;
-  const orbitOrientation = supportsOrbitOrientation(settings.geometry);
-  const renderOrbitPreview = orbitOrientation && settings.geometry.shape !== "custom-path";
+  const orbitOrientation = supportsOrbitOrientation(settings.geometry) && settings.geometry.shape !== "custom-path";
+  const renderOrbitPreview = !supportsPathGeometry(settings.geometry.shape);
   const orbitPathCount = settings.geometry.shape === "sphere"
     ? Math.min(Math.max(target.count || 9, 2), 24)
     : 1;
@@ -569,13 +360,13 @@ function GeometryPathEditor({ settings, target }: { settings: MotionSettings; ta
       const dy = event.clientY - bounds.top - bounds.height / 2;
       if (activeHandle.current === "rotation") {
         const degrees = Math.atan2(dy, dx) * 180 / Math.PI;
-        DialStore.updateValue(panelId, "geometry.circleRotation", Math.round(degrees));
+        updateLegacyValue("geometry.circleRotation", Math.round(degrees));
         return;
       }
       if (activeHandle.current === "tilt") {
         const dyInViewBox = dy * viewHeight / bounds.height;
         const normalized = Math.min(1, Math.max(-1, -dyInViewBox / tiltTravel));
-        DialStore.updateValue(panelId, "geometry.tilt", Math.round(normalized * 90));
+        updateLegacyValue("geometry.tilt", Math.round(normalized * 90));
         return;
       }
       const radians = -circleRotation * Math.PI / 180;
@@ -583,10 +374,10 @@ function GeometryPathEditor({ settings, target }: { settings: MotionSettings; ta
       const localY = dx * Math.sin(radians) + dy * Math.cos(radians);
       if (activeHandle.current === "x") {
         const normalized = Math.abs(localX) / bounds.width;
-        DialStore.updateValue(panelId, "geometry.radiusX", Math.round(normalized * 100));
+        updateLegacyValue("geometry.radiusX", Math.round(normalized * 100));
       } else {
         const normalized = Math.abs(localY) / bounds.height;
-        DialStore.updateValue(panelId, "geometry.radiusY", Math.round(normalized * 100));
+        updateLegacyValue("geometry.radiusY", Math.round(normalized * 100));
       }
       return;
     }
@@ -602,7 +393,7 @@ function GeometryPathEditor({ settings, target }: { settings: MotionSettings; ta
     if (!drawing.current) return;
     drawing.current = false;
     if (draft.current.length >= 2) {
-      DialStore.updateValue(panelId, "geometry.customPath", JSON.stringify(draft.current));
+      updateLegacyValue("geometry.customPath", JSON.stringify(draft.current));
     }
   };
   const startHandle = (
@@ -736,17 +527,15 @@ function OrbitPreview({
 
   const itemCount = target.count > 0 ? target.count : 9;
   const drawCount = Math.min(itemCount, 18);
-  const previewScale = target.frameWidth > 0 && target.frameHeight > 0
-    ? Math.min(
-        Math.max(previewSize.width - 24, 1) / target.frameWidth,
-        Math.max(previewSize.height - 24, 1) / target.frameHeight,
-      )
-    : 0.22;
-  const cards = Array.from({ length: drawCount }, (_, previewIndex) => {
+  const previewScale = Math.min(previewSize.width/(target.frameWidth||720),previewSize.height/(target.frameHeight||400));
+  const cards = referenceDefinition(settings) ? referenceScene(settings,Array.from({length:itemCount},(_,i)=>target.items[i]??{width:72,height:92}),target.frameWidth||720,target.frameHeight||400,time).map(card=>({
+    index:card.source,layer:card.layer,layerCount:1,width:card.width*previewScale,height:card.height*previewScale,offsetX:0,offsetY:0,
+    point:{x:card.x-(target.frameWidth||720)/2,y:card.y-(target.frameHeight||400)/2,z:0,scaleX:1,scaleY:1,rotation:card.rotation,opacity:card.opacity??1,radius:card.radius,shade:card.shade},
+  })) : Array.from({ length: drawCount }, (_, previewIndex) => {
     const index = itemCount <= drawCount
       ? previewIndex
       : Math.floor((previewIndex / drawCount) * itemCount);
-    const sourceSize = target.items[previewIndex] ?? {
+    const sourceSize = target.items[index] ?? {
       width: 72,
       height: 92,
       offsetX: 0,
@@ -758,6 +547,7 @@ function OrbitPreview({
       target.frameHeight || 400,
       sourceSize.width,
       sourceSize.height,
+      itemCount,
     );
     const frames = generateNodeKeyframes(fittedSettings, index, itemCount);
     const width = Math.max(1, sourceSize.width * previewScale);
@@ -818,6 +608,7 @@ function OrbitPreview({
     >
       <div className="preview-grid" />
       <div className="preview-origin" />
+      <div style={{position:"absolute",inset:0,clipPath:referenceDefinition(settings)?`inset(${Math.max(0,(previewSize.height-(target.frameHeight||400)*previewScale)/2)}px ${Math.max(0,(previewSize.width-(target.frameWidth||720)*previewScale)/2)}px)`:undefined}}>
       {cards.map(({ index, layer, layerCount, point, width, height, offsetX, offsetY }) => (
         <div
           className={`preview-card preview-card-${index % 5}`}
@@ -828,9 +619,10 @@ function OrbitPreview({
             marginLeft: -width / 2,
             marginTop: -height / 2,
             opacity: point.opacity,
+            borderRadius:point.radius===undefined?undefined:point.radius*previewScale,
             filter: layer === 0 && settings.appearance.farBlur > 0
               ? `blur(${settings.appearance.farBlur * previewScale}px)`
-              : undefined,
+              : point.shade?`brightness(${1-point.shade})`:undefined,
             boxShadow: layer === layerCount - 1 && settings.appearance.frontShadow > 0
               ? `0 ${settings.appearance.frontShadow * previewScale * .5}px ${settings.appearance.frontShadow * previewScale}px rgba(0,0,0,.3)`
               : undefined,
@@ -841,15 +633,16 @@ function OrbitPreview({
           <span>{String(index + 1).padStart(2, "0")}</span>
         </div>
       ))}
+      </div>
       <button
         className="preview-back"
         type="button"
-        aria-label="Back to animation gallery"
-        title="Back to animations"
+        aria-label="Choose preset"
+        title="Presets"
         onClick={onBack}
       >
         <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
-          <path d="m15 18-6-6 6-6" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+          <path d="M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h7v7h-7z" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" />
         </svg>
       </button>
       <button
@@ -892,11 +685,11 @@ function PresetThumbnail({
   const frameWidth = target.frameWidth || 720;
   const frameHeight = target.frameHeight || 400;
   const previewScale = Math.min(132 / frameWidth, 84 / frameHeight);
-  const cardFrames = useMemo(() => (
+  const cardFrames = useMemo(() => (referenceDefinition(settings)?[]:
     Array.from({ length: drawCount }, (_, index) => {
       const source = target.items[index] ?? { width: 72, height: 92, offsetX: 0, offsetY: 0 };
-      const fitted = fitSettingsToFrame(settings, frameWidth, frameHeight, source.width, source.height);
-      const thumbnailSize = fitPreviewItem(source.width, source.height, previewScale, 132, 84);
+      const fitted = fitSettingsToFrame(settings, frameWidth, frameHeight, source.width, source.height, itemCount);
+      const thumbnailSize = {width:source.width*previewScale,height:source.height*previewScale};
       return {
         index,
         frames: generateNodeKeyframes(fitted, index, itemCount),
@@ -905,7 +698,8 @@ function PresetThumbnail({
       };
     })
   ), [drawCount, frameHeight, frameWidth, itemCount, previewScale, settings, target.items]);
-  const cards = cardFrames.map(({ frames, ...card }) => ({
+  const nativeCards=referenceDefinition(settings)?referenceScene(settings,Array.from({length:itemCount},(_,i)=>target.items[i]??{width:72,height:92}),frameWidth,frameHeight,time):null;
+  const cards = nativeCards ? nativeCards.map(card=>({index:card.source,width:card.width*previewScale,height:card.height*previewScale,point:{x:card.x-frameWidth/2,y:card.y-frameHeight/2,z:card.layer,opacity:card.opacity??1,rotation:card.rotation,scaleX:1,scaleY:1,stackOrder:card.layer,radius:card.radius,shade:card.shade}})) : cardFrames.map(({ frames, ...card }) => ({
     ...card,
     point: sampleGeneratedKeyframes(
       frames,
@@ -920,16 +714,17 @@ function PresetThumbnail({
       {cards.map(({ index, point, width, height }, order) => (
         <span
           className={`preset-thumbnail-card preview-card-${index % 5}`}
-          key={index}
+          key={`${index}-${order}`}
           style={{
             width,
             height,
             marginLeft: -width / 2,
             marginTop: -height / 2,
             opacity: point.opacity,
+            borderRadius:point.radius===undefined?undefined:point.radius*previewScale,
             filter: settings.appearance.farBlur > 0 && point.z < 0
               ? `blur(${settings.appearance.farBlur * previewScale}px)`
-              : undefined,
+              : point.shade?`brightness(${1-point.shade})`:undefined,
             boxShadow: settings.appearance.frontShadow > 0 && point.z >= 0
               ? `0 ${settings.appearance.frontShadow * previewScale * .5}px ${settings.appearance.frontShadow * previewScale}px rgba(0,0,0,.3)`
               : undefined,
@@ -946,14 +741,33 @@ function PresetGallery({
   settings,
   target,
   onSelect,
+  saved,
+  onLoad,
+  onCurrent,
+  onSave,
+  onDelete,
+  theme,
 }: {
   settings: MotionSettings;
   target: TargetPreview;
   onSelect: (preset: PresetId) => void;
+  saved: {id: string; name: string; settings: MotionSettings}[];
+  onLoad: (id: string) => void;
+  onCurrent: () => void;
+  onSave: () => void;
+  onDelete: (id: string) => void;
+  theme: "light" | "dark";
 }) {
   const time = usePreviewTime(3600);
+  const fingerprint = motionFingerprint(settings);
+  const currentSaved = saved.find((item) => motionFingerprint(item.settings) === fingerprint);
+  const showCurrent = Boolean(currentSaved) || fingerprint !== motionFingerprint(freshPreset(settings.preset, settings));
   const galleryPresets = useMemo(() => (
-    families.map((family) => ({
+    [
+      ...families.filter(family=>family.name.startsWith("Orbit ")),
+      ...activeReferencePresets.map(p=>({name:p.label,description:"Editable native animation",variants:[{id:p.id,name:p.label}]})),
+      ...families.filter(family=>!family.name.startsWith("Orbit ")),
+    ].map((family) => ({
       value: family.variants[0].id,
       label: family.name,
       description: family.description,
@@ -964,10 +778,19 @@ function PresetGallery({
   return (
     <main className="gallery-page">
       <section className="preset-gallery" aria-label="Animation presets">
+        {showCurrent && <div className="preset-gallery-item saved-preset-row dialkit-root" data-theme={theme}>
+          <button className="saved-preset-preview" type="button" title={currentSaved ? `Current · ${currentSaved.name}` : "Current"} onClick={onCurrent}><PresetThumbnail settings={settings} target={target} time={time} /><span>Current</span></button>
+          <button className="dialkit-toolbar-add saved-preset-save" type="button" aria-label="Save current preset" title={currentSaved ? "Already saved" : "Save current preset"} disabled={Boolean(currentSaved)} onClick={onSave}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7"><path d="M5 3h12l4 4v14H3V3h2Zm2 0v6h10V3M7 21v-8h10v8" /></svg></button>
+          {currentSaved && <button className="dialkit-toolbar-add" type="button" aria-label={`Delete ${currentSaved.name}`} title="Delete saved preset" onClick={() => onDelete(currentSaved.id)}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7"><path d="M4 7h16M9 7V4h6v3M6 7l1 14h10l1-14M10 10v8m4-8v8" /></svg></button>}
+        </div>}
+        {saved.filter((item) => item.id !== currentSaved?.id).map((item) => <div className="preset-gallery-item saved-preset-row dialkit-root" data-theme={theme} key={item.id}>
+          <button className="saved-preset-preview" type="button" onClick={() => onLoad(item.id)}><PresetThumbnail settings={item.settings} target={target} time={time} /><span>{item.name}</span></button>
+          <button className="dialkit-toolbar-add" type="button" aria-label={`Delete ${item.name}`} title="Delete saved preset" onClick={() => onDelete(item.id)}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7"><path d="M4 7h16M9 7V4h6v3M6 7l1 14h10l1-14" /></svg></button>
+        </div>)}
         {galleryPresets.map((preset, index) => {
           return (
             <button
-              className="preset-gallery-card"
+              className="preset-gallery-item preset-gallery-card"
               type="button"
               key={preset.value}
               title={preset.description}
@@ -1191,37 +1014,34 @@ function App() {
     appliedSettings: null,
     appliedPreset: null,
   });
-  const [status, setStatus] = useState<{ kind: "success" | "error"; message: string } | null>(null);
+  const [status, setStatus] = useState<{
+    kind: "success" | "error";
+    message: string;
+    diagnostics?: string;
+  } | null>(null);
+  const [diagnosticsCopied, setDiagnosticsCopied] = useState(false);
+  const [lastDiagnostics, setLastDiagnostics] = useState<string | null>(null);
   const [operation, setOperation] = useState<"apply" | "clear" | null>(null);
+  const [pasteDraft,setPasteDraft]=useState<string|null>(null);
 
   const resetSettings = useCallback(() => {
     setStatus(null);
-    DialStore.resetValues(panelId);
-    const defaults = DialStore.getValues(panelId);
-    const turntable = DialStore.getPresets(panelId).find(
-      (preset) => preset.name === "3D · Turntable",
-    );
-    if (turntable) DialStore.loadPreset(panelId, turntable.id);
-    DialStore.updateValues(panelId, defaults);
+    const stored = DialStore.getValues(panelId);
+    const id = stored.preset as PresetId;
+    const current = settingsFromSaved(stored, freshPreset(id));
+    applySettingsToStore(freshPreset(id, current));
   }, []);
 
-  const values = useDialKit("Orbit Animator", controls, {
+  useDialKit("Motion Loops", controls, {
     id: panelId,
     persist: true,
     onAction: (action) => {
       if (action === "other.resetSettings") resetSettings();
+      if (action === "other.copyJson") void copySettingsJson();
+      if (action === "other.pasteJson") void pasteSettingsJson();
     },
-  }) as unknown as UiSettings;
-  const { advanced, ...basicGeometry } = values.geometry;
-  const effectiveValues: MotionSettings = {
-    ...values,
-    geometry: { ...basicGeometry, ...advanced },
-    motion: { ...values.motion, keyframes: internalKeyframeSamples },
-    other: {
-      ...values.other,
-      serviceLayers: values.other.serviceLayers ?? (values.other.depthSplit === false ? "0" : "2"),
-    },
-  };
+  });
+  const effectiveValues = fromMotionDocument(documentFromValues(DialStore.getValues(panelId)));
 
   useEffect(() => {
     const storedPresets = DialStore.getPresets(panelId);
@@ -1276,16 +1096,18 @@ function App() {
     }
 
     for (const path of ["motion.fullCycle"] as const) {
-      const transition = DialStore.getValues(panelId)[path] as DialTransition | undefined;
+      const transition = DialStore.getValues(panelId)["parameters.easing"] as DialTransition | undefined;
       if (transition?.type === "spring") {
-        DialStore.updateValue(panelId, path, {
+        updateLegacyValue(path, {
           type: "easing",
           duration: 1,
           ease: [0, 0, 1, 1],
         });
       }
     }
-
+    const draft = { ...DialStore.getValues(panelId) };
+    DialStore.clearActivePreset(panelId);
+    DialStore.updateValues(panelId, draft);
   }, []);
 
   useEffect(() => {
@@ -1305,23 +1127,7 @@ function App() {
               restoredTarget.frameWidth,
               restoredTarget.frameHeight,
             );
-            DialStore.clearActivePreset(panelId);
-            DialStore.updateValue(panelId, "preset", restored.preset);
-            for (const [key, value] of Object.entries(restored.motion)) {
-              if (key !== "keyframes") DialStore.updateValue(panelId, `motion.${key}`, value as never);
-            }
-            for (const [key, value] of Object.entries(restored.geometry)) {
-              const path = advancedGeometryKeySet.has(key)
-                ? `geometry.advanced.${key}`
-                : `geometry.${key}`;
-              DialStore.updateValue(panelId, path, value as never);
-            }
-            for (const [key, value] of Object.entries(restored.appearance)) {
-              DialStore.updateValue(panelId, `appearance.${key}`, value as never);
-            }
-            for (const [key, value] of Object.entries(restored.other)) {
-              DialStore.updateValue(panelId, `other.${key}`, value as never);
-            }
+            applySettingsToStore(restored);
             setPage("editor");
           } else if (message.selection.appliedPreset) {
             const label = presetOptions.find(
@@ -1337,7 +1143,9 @@ function App() {
         }
       }
       if (message.type === "result") {
+        if (message.diagnostics) setLastDiagnostics(message.diagnostics);
         setOperation(null);
+        setDiagnosticsCopied(false);
         setStatus(message.kind === "error" ? message : null);
       }
     };
@@ -1355,7 +1163,7 @@ function App() {
     if (operation) return;
     setStatus(null);
     setOperation("apply");
-    send({ type: "apply", settings: effectiveValues });
+    send({ type: "apply", settings: toMotionDocument(effectiveValues) });
   };
 
   const clearMotion = () => {
@@ -1363,6 +1171,20 @@ function App() {
     setStatus(null);
     setOperation("clear");
     send({ type: "clear", scope: effectiveValues.other.scope });
+  };
+
+  const copyDiagnostics = async (diagnostics = status?.diagnostics) => {
+    if (!diagnostics) return;
+    try {
+      await writeClipboardText(diagnostics);
+      setDiagnosticsCopied(true);
+    } catch (error) {
+      setStatus({
+        kind: "error",
+        message: error instanceof Error ? error.message : "Could not copy diagnostics.",
+        diagnostics,
+      });
+    }
   };
 
   const copySettingsJson = async () => {
@@ -1377,10 +1199,8 @@ function App() {
     }
   };
 
-  const pasteSettingsJson = async () => {
+  const importSettingsJson = (text:string) => {
     try {
-      if (!navigator.clipboard?.readText) throw new Error("Clipboard access is unavailable in this Figma version.");
-      const text = await navigator.clipboard.readText();
       const parsed = parseSettingsJson(text, effectiveValues);
       const imported = migrateSettingsToPercent(
         parsed,
@@ -1388,6 +1208,7 @@ function App() {
         activeTarget.frameHeight,
       );
       applySettingsToStore(imported);
+      setPasteDraft(null);
       setStatus({ kind: "success", message: "Settings JSON pasted." });
     } catch (error) {
       setStatus({
@@ -1397,10 +1218,38 @@ function App() {
     }
   };
 
+  const pasteSettingsJson = async () => {
+    setStatus(null);
+    try {
+      if(navigator.clipboard?.readText){
+        const text=await navigator.clipboard.readText();
+        if(text.trim()){importSettingsJson(text);return;}
+      }
+    }catch{
+      // Figma may deny programmatic reads; a user paste event still works.
+    }
+    setPasteDraft("");
+  };
+
   const selectPreset = (preset: PresetId) => {
+    setStatus(null);
+    setDiagnosticsCopied(false);
     applySettingsToStore(freshPreset(preset, effectiveValues));
     window.scrollTo({ top: 0, behavior: "auto" });
     setPage("editor");
+  };
+
+  const savedPresets = DialStore.getPresets(panelId)
+    .filter((item) => !presetOptions.some((preset) => preset.label === item.name) && item.name !== "Version 1")
+    .map((item) => ({...item, settings: settingsFromSaved(item.values, effectiveValues)}));
+  const saveCurrent = () => {
+    const base = familyFor(effectiveValues.preset).name;
+    const names = new Set(savedPresets.map((item) => item.name));
+    let number = 1;
+    while (names.has(`${base} · ${number}`)) number += 1;
+    DialStore.savePreset(panelId, `${base} · ${number}`);
+    // Keep editing a draft, never silently mutate a saved preset.
+    applySettingsToStore(effectiveValues);
   };
 
   if (page === "gallery") {
@@ -1409,6 +1258,12 @@ function App() {
         settings={effectiveValues}
         target={selection.targets[effectiveValues.other.scope]}
         onSelect={selectPreset}
+        saved={savedPresets}
+        onLoad={(id) => { const item = savedPresets.find((entry) => entry.id === id); if (item) applySettingsToStore(item.settings); setPage("editor"); }}
+        onCurrent={() => setPage("editor")}
+        onSave={saveCurrent}
+        onDelete={(id) => DialStore.deletePreset(panelId, id)}
+        theme={theme}
       />
     );
   }
@@ -1425,13 +1280,32 @@ function App() {
         }}
       />
 
-      {status && <div className={`status ${status.kind}`}>{status.message}</div>}
+      {status && <div className={`status ${status.kind}`}>
+        <div>{status.message}</div>
+        {status.kind === "error" && status.diagnostics && (
+          <button className="diagnostics-copy" type="button" onClick={() => void copyDiagnostics()}>
+            {diagnosticsCopied ? "Diagnostics copied" : "Copy diagnostics"}
+          </button>
+        )}
+      </div>}
+
+      {pasteDraft!==null&&<section className="paste-settings dialkit-root" data-theme={theme} aria-label="Import settings">
+        <label htmlFor="paste-settings-json">Paste settings JSON (⌘V / Ctrl+V)</label>
+        <textarea id="paste-settings-json" autoFocus value={pasteDraft} onChange={event=>setPasteDraft(event.target.value)}
+          onKeyDown={event=>{if(event.key==="Escape")setPasteDraft(null);}} spellCheck={false}/>
+        <div className="other-clipboard-row">
+          <button className="dialkit-button" onClick={()=>setPasteDraft(null)}>Cancel</button>
+          <button className="dialkit-button" disabled={!pasteDraft.trim()} onClick={()=>importSettingsJson(pasteDraft)}>Import JSON</button>
+        </div>
+      </section>}
 
       <PresetEditor settings={effectiveValues} onChange={applySettingsToStore}
-        copy={copySettingsJson} paste={pasteSettingsJson}
-        saved={DialStore.getPresets(panelId).filter((item) => !presetOptions.some((preset) => preset.label === item.name) && item.name !== "Version 1")}
-        load={(id) => DialStore.loadPreset(panelId, id)}
-        save={(name) => DialStore.savePreset(panelId, name)} />
+        theme={theme} panelId={panelId}
+        diagnosticsAction={<button className="dialkit-button diagnostics-action" type="button" disabled={!lastDiagnostics || operation !== null}
+          onClick={() => void copyDiagnostics(lastDiagnostics ?? undefined)}>
+          {diagnosticsCopied ? "Diagnostics copied" : "Copy diagnostics"}
+        </button>}
+        shapeEditor={<GeometryPathEditor settings={effectiveValues} target={selection.targets[effectiveValues.other.scope]} />} />
 
       <div className="dialkit-root bottom-actions" data-theme={theme}>
         <button

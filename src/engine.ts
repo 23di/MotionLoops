@@ -7,6 +7,8 @@ import type {
 } from "./types";
 
 export interface PointState {
+  radius?: number;
+  shade?: number;
   stackOrder?: number;
   x: number;
   y: number;
@@ -92,6 +94,7 @@ export function fitSettingsToFrame(
   frameHeight: number,
   itemWidth: number,
   itemHeight: number,
+  count = 1,
 ): MotionSettings {
   if (
     frameWidth <= 0 ||
@@ -105,15 +108,20 @@ export function fitSettingsToFrame(
 
   const padding = Math.min(frameWidth, frameHeight) * 0.02;
   const percentUnits = settings.geometry.units === "percent";
+  const desiredScale = settings.appearance.nearScale * (percentUnits && (settings.appearance.cardSize ?? 0) > 0
+    ? frameHeight * settings.appearance.cardSize! / 100 / itemHeight : 1);
   const verticalFootprint = settings.geometry.shape === "falling-stack" ? 1.36 : 1;
+  const gridMotion = settings.geometry.shape === "tile-wave" || settings.geometry.shape === "crosscurrent";
+  const gridColumns = gridMotion ? Math.ceil(Math.sqrt(Math.max(1, count))) : 1;
+  const gridRows = gridMotion ? Math.ceil(Math.max(1, count) / gridColumns) : 1;
   const fitScale = settings.geometry.dynamicScale
-    ? Math.max(0.05, Math.min(
-        settings.appearance.nearScale,
-        (frameWidth - padding * 2) / itemWidth,
-        (frameHeight - padding * 2) / (itemHeight * verticalFootprint),
+    ? Math.max(settings.appearance.cardSize ? 0.0001 : 0.05, Math.min(
+        desiredScale,
+        (frameWidth - padding * 2) / (itemWidth * (gridMotion ? gridColumns + 0.3 : 1)),
+        (frameHeight - padding * 2) / (itemHeight * verticalFootprint * (gridMotion ? gridRows + 0.5 : 1)),
       ))
-    : settings.appearance.nearScale;
-  const nearScale = Math.min(settings.appearance.nearScale, fitScale);
+    : desiredScale;
+  const nearScale = Math.min(desiredScale, fitScale);
   const scaleRatio = settings.appearance.nearScale > 0
     ? nearScale / settings.appearance.nearScale
     : 1;
@@ -124,9 +132,13 @@ export function fitSettingsToFrame(
   let resolvedDepth = percentUnits
     ? Math.min(frameWidth, frameHeight) * settings.geometry.depth / 100
     : settings.geometry.depth;
+  // Values beyond the slider's normal 0–100 range are an explicit manual
+  // override. Keep normal values fitted, but do not make typed extra values inert.
+  const radiusXOverRange = percentUnits && settings.geometry.radiusX > 100;
+  const radiusYOverRange = percentUnits && settings.geometry.radiusY > 100;
   if (settings.geometry.dynamicScale) {
-    radiusX = Math.min(radiusX, availableX);
-    radiusY = Math.min(radiusY, availableY);
+    if(!radiusXOverRange)radiusX = Math.min(radiusX, availableX);
+    if(!radiusYOverRange)radiusY = Math.min(radiusY, availableY);
   }
   if (settings.geometry.shape === "falling-stack") {
     // Define the stack in proportions of the rendered card, then convert to
@@ -138,7 +150,7 @@ export function fitSettingsToFrame(
     const travelRatio = 0.34 * Math.max(settings.geometry.itemSpread, 0.1);
     radiusY = verticalTravel / travelRatio;
   }
-  if (settings.geometry.dynamicScale && (
+  if (settings.geometry.dynamicScale && !radiusXOverRange && !radiusYOverRange && (
     settings.geometry.shape === "ellipse" ||
     supportsOrbitOrientation(settings.geometry)
   )) {
@@ -168,7 +180,7 @@ export function fitSettingsToFrame(
     appearance: {
       ...settings.appearance,
       nearScale,
-      farScale: Math.max(0.05, settings.appearance.farScale * scaleRatio),
+      farScale: Math.max(settings.appearance.cardSize ? 0.0001 : 0.05, settings.appearance.farScale * scaleRatio),
     },
   };
 }
@@ -355,6 +367,39 @@ export function pointForGeometry(
   pathAngle = parametric.pathAngle;
 
   switch (settings.geometry.shape) {
+    case "crosscurrent": {
+      const rows = Math.min(3, Math.ceil(Math.sqrt(safeCount)));
+      const row = index % rows;
+      const column = Math.floor(index / rows);
+      const rowSize = Math.ceil((safeCount - row) / rows);
+      const travel = globalAngle / TAU * (row % 2 ? -1 : 1) + column / rowSize + row * 0.17;
+      const phase = ((travel % 1) + 1) % 1;
+      x = (phase * 2 - 1) * rx;
+      y = (rows === 1 ? 0 : row / (rows - 1) * 2 - 1) * ry * 0.72 + x * 0.12;
+      z = depth * ((rows === 1 ? 0 : row / (rows - 1) - 0.5) * 0.8 + Math.sin(phase * TAU) * 0.15);
+      opacityMultiplier = seamlessWrapOpacity(phase, 0.16);
+      pathAngle = 0;
+      break;
+    }
+    case "tile-wave": {
+      const columns = Math.ceil(Math.sqrt(safeCount));
+      const rows = Math.ceil(safeCount / columns);
+      const column = index % columns;
+      const row = Math.floor(index / columns);
+      const delay = (column + row) / Math.max(columns + rows - 2, 1) * 0.18;
+      const phase = ((globalAngle / TAU % 1) + 1) % 1;
+      const enter = smoothStep01((phase - delay) / 0.24);
+      const leave = smoothStep01((phase - 0.68 - delay * 0.45) / 0.22);
+      const gridX = columns === 1 ? 0 : column / (columns - 1) * 2 - 1;
+      const gridY = rows === 1 ? 0 : row / (rows - 1) * 2 - 1;
+      x = rx * gridX * (0.76 + leave * 0.12) * itemSpread;
+      y = ry * (gridY * 0.7 * itemSpread + (1 - enter) * 0.22 - leave * 0.14);
+      z = depth * (enter * 1.4 - 0.7);
+      scaleXMultiplier = scaleYMultiplier = 0.72 + enter * 0.28 - leave * 0.08;
+      opacityMultiplier = enter * (1 - leave);
+      pathAngle = 0;
+      break;
+    }
     case "sphere": {
       const spherePoint = sphereSurfacePoint(index, safeCount);
       const cosine = Math.cos(globalAngle);
@@ -457,8 +502,10 @@ export function pointForGeometry(
       pathAngle = Math.PI / 2;
       break;
     case "racetrack": {
-      const cosine = Math.cos(angle);
-      const sine = Math.sin(angle);
+      const rawCosine = Math.cos(angle);
+      const rawSine = Math.sin(angle);
+      const cosine = Math.abs(rawCosine)<1e-12?0:rawCosine;
+      const sine = Math.abs(rawSine)<1e-12?0:rawSine;
       x = Math.sign(cosine) * rx * 0.82 * shapeAmount * Math.sqrt(Math.abs(cosine));
       y = Math.sign(sine) * ry * 0.45 * shapeAmount * Math.sqrt(Math.abs(sine));
       z = depth * sine;
@@ -599,8 +646,8 @@ export function pointForGeometry(
     x,
     y,
     z,
-    scaleX: clamp(scale * scaleXMultiplier, 0.05, 4),
-    scaleY: clamp(scale * scaleYMultiplier, 0.05, 4),
+    scaleX: clamp(scale * scaleXMultiplier, settings.appearance.cardSize ? 0.0001 : 0.05, settings.appearance.cardSize ? 10000 : 4),
+    scaleY: clamp(scale * scaleYMultiplier, settings.appearance.cardSize ? 0.0001 : 0.05, settings.appearance.cardSize ? 10000 : 4),
     opacity: clamp(opacity * opacityMultiplier, 0, 1),
     rotation: rotationValue,
   };
@@ -619,6 +666,27 @@ export function generateNodeKeyframes(
   const result: GeneratedKeyframe[] = [];
 
   const positions = Array.from({ length: samples + 1 }, (_, sample) => sample / samples);
+  const timing = settings.motion.fullCycle;
+  if (settings.geometry.shape === "crosscurrent" && timing.type !== "spring" &&
+      Array.isArray(timing.ease) && timing.ease[0] === timing.ease[1] && timing.ease[2] === timing.ease[3]) {
+    const safeCount = Math.max(1, count);
+    const rows = Math.min(3, Math.ceil(Math.sqrt(safeCount)));
+    const row = index % rows;
+    const rowSize = Math.ceil((safeCount - row) / rows);
+    const offset = Math.floor(index / rows) / rowSize + row * 0.17;
+    const speed = direction * settings.geometry.turns * (row % 2 ? -1 : 1);
+    if (speed !== 0) {
+      const low = Math.floor(Math.min(offset, offset + speed));
+      const high = Math.ceil(Math.max(offset, offset + speed));
+      for (let crossing = low; crossing <= high; crossing += 1) {
+        const progress = (crossing - offset) / speed;
+        for (const delta of [-1e-7, 0, 1e-7]) {
+          if (progress + delta > 0 && progress + delta < 1) positions.push(progress + delta);
+        }
+      }
+    }
+    positions.sort((a, b) => a - b);
+  }
   if (fallingStack) {
     for (let step = 1; step <= Math.max(1, count); step += 1) {
       positions.push(step / Math.max(1, count) - 1e-7);

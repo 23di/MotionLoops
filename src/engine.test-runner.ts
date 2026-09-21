@@ -10,7 +10,9 @@ import {
   supportsPathGeometry,
 } from "./engine";
 import { builtInPresetTunings } from "./presets";
-import { parseSettingsJson, serializeSettingsJson } from "./settings-json";
+import { parseSettingsJson } from "./settings-json";
+// Fixtures intentionally exercise backwards-compatible, pre-v2 JSON import.
+const serializeSettingsJson=(settings:unknown)=>JSON.stringify(settings,null,2);
 import { presetOptions, type MotionSettings } from "./types";
 
 const settings: MotionSettings = {
@@ -110,7 +112,7 @@ function trajectoryDistance(left: MotionSettings, right: MotionSettings): number
   return Math.sqrt(squaredDistance / samples);
 }
 
-assert(presetOptions.length === 21, "Expected twenty-one presets");
+assert(presetOptions.length === 23, "Expected supported presets including legacy ids and two new motions");
 assert(!presetOptions.some((preset) => String(preset.value) === "tunnel"), "Tunnel preset must not remain in the catalog");
 assert(
   presetOptions.filter((preset) => preset.value.startsWith("orbit-3d")).length === 6,
@@ -356,7 +358,7 @@ const racetrackLoop = generateNodeKeyframes({
   geometry: { ...settings.geometry, ...racetrackDefaults },
 }, 0, 1);
 assert(
-  racetrackDefaults.shape === "custom-path" &&
+  racetrackDefaults.shape === "racetrack" &&
     Math.abs(racetrackLoop[0].x - racetrackLoop.at(-1)!.x) < 1e-6 &&
     racetrackLoop[0].opacity > 0,
   "Racetrack must default to a closed visible path",
@@ -552,6 +554,18 @@ const manualGeometry = fitSettingsToFrame({
 assert(
   manualGeometry.geometry.radiusX === 123 && manualGeometry.geometry.radiusY === 77,
   "Manual radii must be preserved when Dynamic Scale is disabled",
+);
+const overRangeRadiusA=fitSettingsToFrame({
+  ...settingsForPreset("circle"),
+  geometry:{...settingsForPreset("circle").geometry,radiusY:120},
+},320,240,80,80);
+const overRangeRadiusB=fitSettingsToFrame({
+  ...settingsForPreset("circle"),
+  geometry:{...settingsForPreset("circle").geometry,radiusY:180},
+},320,240,80,80);
+assert(
+  overRangeRadiusB.geometry.radiusY>overRangeRadiusA.geometry.radiusY,
+  "Typed radii beyond the slider range must keep affecting the trajectory",
 );
 
 const largeCardStack = fitSettingsToFrame(

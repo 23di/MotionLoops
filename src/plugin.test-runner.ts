@@ -3,6 +3,11 @@ import assert from "node:assert/strict";
 import { depthSplitOpacity, fitSettingsToFrame, generateNodeKeyframes, pointForGeometry } from "./engine";
 import { builtInPresetTunings } from "./presets";
 import { presetOptions, type MotionSettings } from "./types";
+import { referencePresets } from "./reference-catalog";
+import { referenceScene } from "./reference-engine";
+import { cloneData } from "./clone-data";
+import { freshPreset } from "./catalog";
+import { toMotionDocument } from "./motion-system";
 
 let nextId = 1;
 const nodes = new Map<string, any>();
@@ -10,7 +15,12 @@ const timeline = { id: "timeline-1", duration: 5 };
 let proxyChildReads = false;
 let findAllCalls = 0;
 let failTrackWrite: { nodeId: string; field: string; remaining?: number } | null = null;
-let failTrackRemoval: { nodeId: string; field: string } | null = null;
+let failTrackRemoval: { nodeId: string; field: string; remaining?:number } | null = null;
+const invalidatedSourceIds=new Set<string>();
+const nodeAliases=new Map<string,any>();
+let remapServiceOnNextMarker=false;
+let remapTreeOnTrackWriteNodeId:string|null=null;
+let remapTreeGeneration=0;
 let parentRelaunchData: Record<string, string> = {};
 let insertChildCalls = 0;
 let failInsertChildRemaining = 0;
@@ -46,6 +56,18 @@ const parent = {
 nodes.set(parent.id, parent);
 const topFrame = { absoluteBoundingBox: { x: 0, y: 0, width: 720, height: 400 } };
 
+function remapAttachedTreeIds():void {
+  remapTreeGeneration += 1;
+  for(const node of [parent,...parent._children]){
+    const oldId=node.id;
+    nodes.delete(oldId);
+    node.id=`${oldId}-tree-${remapTreeGeneration}`;
+    nodeAliases.set(oldId,node);
+    nodes.set(node.id,node);
+  }
+}
+
+let nativeCoordinateWrites=false;
 function makeNode(name: string): any {
   const pluginData = new Map<string, string>();
   let relaunchData: Record<string, string> = {};
@@ -56,6 +78,15 @@ function makeNode(name: string): any {
     width: 80,
     height: 100,
     opacity: 1,
+    rotation:0,
+    _x:0,_y:0,_previousX:0,
+    get x(){return this._x;},
+    set x(value:number){this._previousX=this._x;this._x=value;},
+    get y(){return this._y;},
+    set y(value:number){if(nativeCoordinateWrites)this._x=this._previousX;this._y=value;},
+    get relativeTransform(){return [[1,0,this._x],[0,1,this._y]];},
+    set relativeTransform(value:number[][]){this._x=value[0][2];this._y=value[1][2];},
+    rescale(scale:number){this.width*=scale;this.height*=scale;},
     effects: [] as any[],
     absoluteBoundingBox: { x: 320, y: 150, width: 80, height: 100 },
     _parent: parent,
@@ -65,16 +96,31 @@ function makeNode(name: string): any {
     },
     set parent(value: any) { this._parent = value; },
     locked: false,
+    visible: true,
     removed: false,
     timelines: [timeline],
     manualKeyframeTracks: {} as Record<string, unknown>,
     removedTrackNames: [] as string[],
     getTopLevelFrame: () => topFrame,
     getPluginData: (key: string) => pluginData.get(key) ?? "",
-    setPluginData: (key: string, value: string) => pluginData.set(key, value),
+    setPluginData: (key: string, value: string) => {
+      if(invalidatedSourceIds.has(node.id))throw new Error("Source proxy invalidated by service removal");
+      pluginData.set(key,value);
+      if(remapServiceOnNextMarker&&key==="orbit-motion"&&value){
+        const marker=JSON.parse(value);
+        if(marker.role==="back"&&marker.effectsVersion===1){
+          remapServiceOnNextMarker=false;
+          nodes.delete(node.id);node.id=`${node.id}-remapped`;nodes.set(node.id,node);
+        }
+      }
+    },
     setRelaunchData: (data: Record<string, string>) => { relaunchData = { ...data }; },
     getRelaunchData: () => ({ ...relaunchData }),
     applyManualKeyframeTrack(field: { name: string }, track: unknown) {
+      if(remapTreeOnTrackWriteNodeId===this.id){
+        remapTreeOnTrackWriteNodeId=null;
+        remapAttachedTreeIds();
+      }
       if (failTrackWrite?.nodeId === this.id && failTrackWrite.field === field.name) {
         if ((failTrackWrite.remaining ?? 1) > 1) failTrackWrite.remaining = (failTrackWrite.remaining ?? 1) - 1;
         else failTrackWrite = null;
@@ -84,7 +130,8 @@ function makeNode(name: string): any {
     },
     removeManualKeyframeTrack(field: { name: string }) {
       if (failTrackRemoval?.nodeId === this.id && failTrackRemoval.field === field.name) {
-        failTrackRemoval = null;
+        if((failTrackRemoval.remaining??1)>1)failTrackRemoval.remaining!--;
+        else failTrackRemoval = null;
         throw new Error("Simulated track removal failure");
       }
       this.removedTrackNames.push(field.name);
@@ -96,8 +143,9 @@ function makeNode(name: string): any {
     },
     clone() {
       const clone = makeNode(this.name);
-      clone.manualKeyframeTracks = structuredClone(this.manualKeyframeTracks);
-      clone.effects = structuredClone(this.effects);
+      clone.manualKeyframeTracks = cloneData(this.manualKeyframeTracks);
+      clone.effects = cloneData(this.effects);
+      clone.opacity=this.opacity;clone.visible=this.visible;clone.relativeTransform=this.relativeTransform;
       const marker = this.getPluginData("orbit-motion");
       if (marker) clone.setPluginData("orbit-motion", marker);
       parent.insertChild(parent.children.indexOf(this) + 1, clone);
@@ -137,7 +185,7 @@ globalThis.figma = {
   },
   viewport: { scrollAndZoomIntoView() { viewportNavigationCalls += 1; } },
   motion: { physicalSpringToNormalized: () => 0.25 },
-  getNodeByIdAsync: async (id: string) => nodes.get(id) ?? null,
+  getNodeByIdAsync: async (id: string) => {invalidatedSourceIds.delete(id);return nodeAliases.get(id)??nodes.get(id) ?? null;},
   on() {},
 };
 
@@ -261,8 +309,8 @@ const duplicateApply = onMessage({ type: "apply", settings });
 await Promise.all([firstApply, duplicateApply]);
 assert.equal(
   findAllCalls - findAllCallsBeforeApply,
-  2,
-  "Apply must scan the page once for inventory and once for postcondition verification",
+  3,
+  "Apply scans for inventory, postcondition verification, and the diagnostic snapshot",
 );
 assert.equal(parent.children.length, 2, "Concurrent Apply messages must collapse into one operation");
 assert.equal(viewportNavigationCalls, 0, "Apply must preserve the user's canvas zoom and position");
@@ -273,12 +321,12 @@ assert(
 assert.equal(parent.children.length, 2, "Depth Split must create exactly one back copy");
 assert.deepEqual(
   source.getRelaunchData(),
-  { "edit-orbit": "Edit 3D · Turntable animation in Orbit Animator" },
+  { "edit-orbit": "Edit 3D · Turntable animation in Motion Loops" },
   "Animated sources must expose the native Orbit relaunch action",
 );
 assert.deepEqual(
   parent.getRelaunchData(),
-  { "edit-orbit": "Edit 3D · Turntable animation in Orbit Animator" },
+  { "edit-orbit": "Edit 3D · Turntable animation in Motion Loops" },
   "The animated source's parent must expose the same Orbit relaunch action",
 );
 assertSparseTrackAccuracy(settings);
@@ -348,7 +396,10 @@ assert(
   "Blur handoff must reveal the sharper layer before switching off the farther layer",
 );
 settings.appearance.farBlur = 4;
+settings.appearance.frontShadow = 10;
 await onMessage({ type: "apply", settings });
+assert(source.effects.some((effect:any)=>effect.type==="DROP_SHADOW"&&effect.radius===10),"Front shadow must reach the exported front layer");
+settings.appearance.frontShadow = 0;
 assert.deepEqual(
   firstBack.effects.map((effect: any) => effect.radius),
   [7, 4],
@@ -384,6 +435,10 @@ foreignBack.remove();
 const stalePair = makeNode("Detached stale pair");
 stalePair.setPluginData("orbit-motion", JSON.stringify({ role: "back", sourceId: source.id }));
 parent.children = parent.children.filter((node) => node !== stalePair);
+const movedServiceParent={id:"moved-service-parent",type:"FRAME",children:[stalePair],getPluginData:()=>""};
+nodes.set(movedServiceParent.id,movedServiceParent);
+stalePair.parent=movedServiceParent;
+stalePair.remove=()=>{stalePair.removed=true;movedServiceParent.children=[];nodes.delete(stalePair.id);};
 source.setPluginData("orbit-motion", JSON.stringify({ role: "front", pairId: stalePair.id }));
 
 const staleBack = source.clone();
@@ -526,6 +581,27 @@ assert.deepEqual(
   "Refresh must retry stale insertChild proxies and verify the final service order",
 );
 
+remapServiceOnNextMarker=true;
+const beforeRemap=postedMessages.length;
+await onMessage({type:"apply",settings});
+assert(!postedMessages.slice(beforeRemap).some(message=>message.type==="result"&&message.kind==="error"),"Refresh resolves remapped service IDs before ordering");
+assert.deepEqual(parent.children.slice(0,3).map(node=>JSON.parse(node.getPluginData("orbit-motion")).depthLayer),[0,1,2]);
+const aliasedService=parent.children[0];
+nodeAliases.set("old-service-id",aliasedService);
+nodes.set("old-service-id",new Proxy(aliasedService,{get(target,key){return key==="id"?"old-service-id":Reflect.get(target,key);}}));
+const beforeAliasRefresh=postedMessages.length;
+await onMessage({type:"apply",settings});
+assert(!postedMessages.slice(beforeAliasRefresh).some(message=>message.type==="result"&&message.kind==="error"),"Stale scan aliases must not count as an extra service");
+assert.equal(parent.children.length,4,"Aliased service IDs must not create or delete a depth band");
+nodes.delete("old-service-id");nodeAliases.delete("old-service-id");
+const detachedGhost=makeNode("Card · Orbit Depth 1 (service)");
+detachedGhost.locked=true;
+detachedGhost.setPluginData("orbit-motion",JSON.stringify({role:"back",sourceId:source.id,depthLayer:0}));
+const beforeGhostRefresh=postedMessages.length;
+await onMessage({type:"apply",settings});
+assert(!postedMessages.slice(beforeGhostRefresh).some(message=>message.type==="result"&&message.kind==="error"),"A resolvable stale proxy absent from parent.children is not a fourth service");
+assert.equal(parent.children.length,4,"Only attached source and three services remain");
+nodes.delete(detachedGhost.id);
 settings.other.serviceLayers = "2";
 await onMessage({ type: "apply", settings });
 assert.equal(parent.children.length, 2, "Reducing depth layers must remove surplus service copies on refresh");
@@ -561,7 +637,7 @@ await onMessage({ type: "apply", settings });
 assert.equal(parent.children.length, 2, "The service pair must be recreated before Clear testing");
 
 const markerBeforeFailedClear = source.getPluginData("orbit-motion");
-failTrackRemoval = { nodeId: source.id, field: "ROTATION" };
+failTrackRemoval = { nodeId: source.id, field: "ROTATION", remaining:2 };
 await onMessage({ type: "clear", scope: "selection" });
 assert.equal(parent.children.length, 2, "A partial Clear must retain the linked service copy");
 assert.equal(
@@ -589,7 +665,7 @@ assert(
 
 await onMessage({ type: "clear", scope: "selection" });
 assert(
-  postedMessages.some((message) => message.type === "result" && message.kind === "error" && message.message === "No Orbit Animator motion in the current selection."),
+  postedMessages.some((message) => message.type === "result" && message.kind === "error" && message.message === "No Motion Loops motion in the current selection."),
   "Clearing an unchanged selection must report an error",
 );
 
@@ -622,13 +698,13 @@ assert.deepEqual(
 );
 assert.equal(
   source.manualKeyframeTracks.TRANSLATION_X.baseValue.value,
-  220,
-  "Preset updates must not accumulate horizontal translation drift",
+  0,
+  "The resting horizontal translation must remain zero for Clear",
 );
 assert.equal(
   source.manualKeyframeTracks.TRANSLATION_Y.baseValue.value,
-  110,
-  "Preset updates must not accumulate vertical translation drift",
+  0,
+  "The resting vertical translation must remain zero for Clear",
 );
 
 const interruptedClone = source.clone();
@@ -705,6 +781,17 @@ assert.equal(
   "Changing a preset on a parent must reconcile existing services without duplicates",
 );
 
+// Real Figma can remap the owning frame and all of its children while writing
+// the first source. Later sources then report the replacement parent id. They
+// must still be grouped and ordered as one semantic service family.
+const parentIdBeforeTreeRemap=parent.id;
+const messagesBeforeTreeRemap=postedMessages.length;
+remapTreeOnTrackWriteNodeId=source.id;
+await onMessage({type:"apply",settings});
+assert.notEqual(parent.id,parentIdBeforeTreeRemap,"The fixture must remap the owning frame");
+assert(!postedMessages.slice(messagesBeforeTreeRemap).some(message=>message.type==="result"&&message.kind==="error"),"Parent and child ID remapping must not fail service ordering");
+assert.equal(parent.children.filter(node=>/ \u00b7 Orbit Depth \d+ \(service\)$/.test(node.name)).length,2,"Tree remapping must retain one service per source");
+
 // Reproduce a real document upgraded from an interrupted version: generated
 // names still identify the sibling services, but their stored source ids are stale.
 const servicesBeforeCatalogWalk = parent.children.filter((node) =>
@@ -754,7 +841,7 @@ assert.equal(Object.keys(secondSource.manualKeyframeTracks).length, 0);
 const stackCards = Array.from({ length: 5 }, (_, index) => makeNode(`Stack ${index}`));
 for (const card of stackCards) parent.insertChild(parent.children.length, card);
 globalThis.figma.currentPage.selection = stackCards;
-const stackSettings = structuredClone(settings);
+const stackSettings = cloneData(settings);
 stackSettings.preset = "falling-stack";
 Object.assign(stackSettings.geometry, builtInPresetTunings["falling-stack"].geometry);
 Object.assign(stackSettings.appearance, builtInPresetTunings["falling-stack"].appearance);
@@ -784,9 +871,183 @@ for (const direction of ["clockwise", "counterclockwise"]) {
 
 globalThis.figma.currentPage.selection = [];
 await onMessage({ type: "apply", settings });
+const diagnosticError = postedMessages.findLast(
+  (message) => message.type === "result" && message.kind === "error" && message.message.startsWith("Select layers inside"),
+);
 assert(
-  postedMessages.some((message) => message.type === "result" && message.kind === "error" && message.message.startsWith("Select layers inside")),
+  diagnosticError,
   "Applying with no selection must report an actionable error",
 );
+assert.equal(typeof diagnosticError.diagnostics, "string", "Operation errors must include copyable diagnostics");
+assert(diagnosticError.diagnostics.startsWith("Motion Loops diagnostics\n"), "Diagnostics must use a recognizable envelope");
+const diagnosticPayload = JSON.parse(diagnosticError.diagnostics.split("\n").slice(1).join("\n"));
+assert.equal(diagnosticPayload.operation, "apply", "Diagnostics identify the failed operation");
+assert.equal(diagnosticPayload.error, diagnosticError.message, "Diagnostics preserve the surfaced error");
+assert(diagnosticPayload.events.some((event:any)=>event.step==="apply.route"), "Diagnostics include the engine route");
+assert(diagnosticPayload.events.some((event:any)=>event.step==="operation.failed"), "Diagnostics include the terminal failure stage");
 
 console.log("Orbit plugin doubling: all checks passed");
+
+// Native reference compositions: actual exporter, with the Figma scene API
+// mocked. This verifies track playback and shared-source cleanup, not Figma UI.
+// Match the native Motion stale transform behavior: separate Y writes can
+// restore the X value cached before the preceding X write.
+nativeCoordinateWrites=true;
+Object.assign(topFrame,{id:parent.id,width:720,height:400});
+Object.assign(parent,{width:720,height:400,layoutMode:"NONE",appendChild(node:any){if(node.parent?.children)node.parent.children=node.parent.children.filter((child:any)=>child.id!==node.id);this.insertChild(this.children.length,node);}});
+globalThis.figma.createFrame=()=>{
+  const frame=makeNode("Frame");frame.type="FRAME";frame.children=[];
+  frame.resize=(w:number,h:number)=>{frame.width=w;frame.height=h;};
+  frame.appendChild=(node:any)=>{if(node.parent?.children)node.parent.children=node.parent.children.filter((child:any)=>child.id!==node.id);if(frame.name.includes("Orbit native")&&frame.children.length)frame.children.splice(1,0,node);else frame.children.push(node);node.parent=frame;};
+  frame.insertChild=(index:number,node:any)=>{if(node.parent?.children)node.parent.children=node.parent.children.filter((child:any)=>child.id!==node.id);frame.children.splice(index,0,node);node.parent=frame;};
+  frame.remove=()=>{for(const child of [...frame.children])child.remove();frame.parent.children=frame.parent.children.filter((child:any)=>child.id!==frame.id);frame.removed=true;nodes.delete(frame.id);};
+  return frame;
+};
+globalThis.figma.createRectangle=()=>{const node=makeNode("Rectangle");node.resize=(w:number,h:number)=>{node.width=w;node.height=h;};return node;};
+// Failed clone cleanup must abort before hiding originals or removing old output.
+{
+  const cards=[makeNode("Existing animated card A"),makeNode("Existing animated card B")];
+  for(const card of cards)parent.insertChild(parent.children.length,card);
+  globalThis.figma.currentPage.selection=cards;
+  const legacy=freshPreset("circle");
+  await onMessage({type:"apply",settings:legacy});
+  const legacyCopies=parent.children.filter((node:any)=>node.name.includes("Orbit Depth")&&cards.some(card=>node.name.startsWith(card.name)));
+  const settings=freshPreset("reference-carousel-05");
+  await onMessage({type:"apply",settings});
+  const oldRoot=nodes.get(JSON.parse(cards[0].getPluginData("orbit-motion")).serviceIds[0]);
+  assert(oldRoot?.children.length>0,"Switching legacy motion to Row produces native output");
+  for(const slot of oldRoot.children){
+    const artwork=slot.children.find((child:any)=>child.name!=="Depth backing");
+    for(const time of [0,settings.motion.duration/2,settings.motion.duration]){
+      for(const field of ["TRANSLATION_X","TRANSLATION_Y","ROTATION","SCALE_X","SCALE_Y"]){
+        // Missing tracks leave the previous Orbit transform cached in Figma's
+        // live player, even though the server-side video export looks correct.
+        const track=artwork.manualKeyframeTracks[field];
+        const inheritedValue=field.startsWith("SCALE")?0.5:122;
+        assert.equal(track?sampleTrack(track,time):inheritedValue,field.startsWith("SCALE")?1:0,
+          `Orbit → Row: artwork ${field} stays neutral inside its clipping slot at ${time}s`);
+      }
+    }
+  }
+  assert(legacyCopies.every((node:any)=>!nodes.has(node.id)),"Legacy copies are removed only after Row is built");
+  const clone=cards[0].clone;
+  cards[0].clone=function(){const copy=clone.call(this);failTrackRemoval={nodeId:copy.id,field:"OPACITY"};return copy;};
+  const start=postedMessages.length;
+  await onMessage({type:"apply",settings});
+  assert(postedMessages.slice(start).some(m=>m.kind==="error"),"Clone cleanup failure is reported");
+  assert(nodes.has(oldRoot.id),"Previous output survives failed refresh");
+  assert(cards.every(card=>JSON.parse(card.getPluginData("orbit-motion")).serviceIds[0]===oldRoot.id),"Original links survive failed refresh");
+  cards[0].clone=clone;
+  await onMessage({type:"clear",scope:"selection"});
+}
+for(const preset of referencePresets){
+  const cards=Array.from({length:3},(_,i)=>makeNode(`${preset.label} card ${i}`));
+  for(const [index,card] of cards.entries()){card.relativeTransform=[[1,0,301+index*139],[0,1,423]];parent.insertChild(parent.children.length,card);}
+  globalThis.figma.currentPage.selection=cards;
+  const settings=freshPreset(preset.id),messageStart=postedMessages.length;
+  if(preset.id==="reference-carousel-01")settings.motion.duration=200;
+  await onMessage({type:"apply",settings:toMotionDocument(settings)});
+  const errors=postedMessages.slice(messageStart).filter(m=>m.kind==="error");
+  assert.equal(errors.length,0,JSON.stringify(errors));
+  const result=postedMessages.slice(messageStart).find(m=>m.type==="result"&&m.kind==="success");
+  assert(result?.diagnostics, `${preset.label}: successful application includes downloadable diagnostics`);
+  const report=JSON.parse(result.diagnostics.split("\n").slice(1).join("\n"));
+  assert.equal(report.error,null);
+  assert.equal(report.schemaVersion,2);
+  assert(report.events.some((event:any)=>event.details?.settings), "Report preserves applied settings");
+  const selectedState=postedMessages.slice(messageStart).filter(m=>m.type==="selection").at(-1)?.selection;
+  assert.equal(selectedState.targets.selection.orbitCount,3,`${preset.label}: native service motion enables Refresh and Clear`);
+  const marker=JSON.parse(cards[0].getPluginData("orbit-motion")),root=nodes.get(marker.serviceIds[0]);
+  assert.equal(marker.settings.version,2,"Figma stores the canonical document");
+  assert(!("reference" in marker.settings),"No parallel reference settings are persisted");
+  assert(root&&root.clipsContent,"Reference output clips to the frame");
+  if(preset.id==="reference-board")assert(root.children.length<100,"Board reuses offscreen tiles instead of exporting the full world grid");
+  assert(cards.every(card=>card.opacity===1&&card.visible),"Design canvas retains the editable source cards");
+  assert(cards.every((card,index)=>card.x===301+index*139&&card.y===423),"Apply preserves the source layout outside playback");
+  assert.equal(root.opacity,0,"Centered service copies must not cover the design canvas");
+  assert.equal(sampleTrack(root.manualKeyframeTracks.OPACITY,0),1,"Service composition is visible from the first playback frame");
+  assert.equal(sampleTrack(root.manualKeyframeTracks.OPACITY,settings.motion.duration),1,"Service composition remains visible through the end of playback");
+  for(const slot of root.children){
+    const keys=slot.manualKeyframeTracks.OPACITY.keyframes;
+    for(let i=1;i<keys.length;i++){
+      assert(Math.round(keys[i].timelinePosition*1e6)>Math.round(keys[i-1].timelinePosition*1e6),`${preset.label}: visibility keys must stay distinct at native microsecond precision`);
+      if(keys[i].value.value!==keys[i-1].value.value)assert.equal(keys[i].easing.type,"HOLD",`${preset.label}: service ownership must switch without ghost fades, including the loop seam`);
+    }
+  }
+  assert(cards.every(card=>sampleTrack(card.manualKeyframeTracks.OPACITY,settings.motion.duration/2)===0),"Originals stay hidden during native playback");
+  const sampleCount=preset.id==="reference-board"?500:100;
+  for(let sample=0;sample<sampleCount;sample++){
+    const time=(sample+.37)/sampleCount*settings.motion.duration;
+    const expected=referenceScene(settings,cards,720,400,time);
+    const visible=root.children.filter(slot=>sampleTrack(slot.manualKeyframeTracks.OPACITY,time)>.5);
+    if(preset.id==="reference-board"){
+      // Non-overlapping tiles can safely share offscreen service copies.
+      const remaining=[...visible];
+      for(let i=0;i<expected.length;i++){
+        const card=expected[i];
+        const index=remaining.findIndex(slot=>slot.name.startsWith(cards[card.source].name)&&Math.abs(slot.x+slot.width/2+sampleTrack(slot.manualKeyframeTracks.TRANSLATION_X,time)-card.x)<.06&&Math.abs(slot.y+slot.height/2+sampleTrack(slot.manualKeyframeTracks.TRANSLATION_Y,time)-card.y)<.06);
+        assert(index>=0,`${preset.label}: pooled tile position at ${time}`);
+        visible[i]=remaining.splice(index,1)[0];
+      }
+    }
+    assert.equal(visible.length,expected.length,`${preset.label}: visible slots at ${time}`);
+    for(let i=0;i<expected.length;i++){
+      const slot=visible[i],card=expected[i];
+      assert(slot.name.startsWith(cards[card.source].name),`${preset.label}: correct image order at ${time}: ${slot.name}, expected ${cards[card.source].name}`);
+      assert(Math.abs(slot.x+slot.width/2+sampleTrack(slot.manualKeyframeTracks.TRANSLATION_X,time)-card.x)<.06,`${preset.label}: animated center X at ${time}`);
+      assert(Math.abs(slot.y+slot.height/2+sampleTrack(slot.manualKeyframeTracks.TRANSLATION_Y,time)-card.y)<.06,`${preset.label}: animated center Y`);
+      assert(Math.abs(sampleTrack(slot.manualKeyframeTracks.SCALE_X,time)*slot.width-card.width)<.06,`${preset.label}: width`);
+      assert(Math.abs(sampleTrack(slot.manualKeyframeTracks.SCALE_Y,time)*slot.height-card.height)<.06,`${preset.label}: height`);
+      const image=slot.children[slot.children.length-1];
+      assert.equal(image.x,(slot.width-image.width)/2,"Cloned card is centered inside its clipping slot on X");
+      assert.equal(image.y,(slot.height-image.height)/2,"Cloned card is centered inside its clipping slot on Y");
+      const alpha=image.manualKeyframeTracks.OPACITY?sampleTrack(image.manualKeyframeTracks.OPACITY,time):image.opacity;
+      assert(Math.abs(alpha-(1-(card.shade??0))*(card.opacity??1))<.001,`${preset.label}: image fade`);
+    }
+  }
+  const before=[...root.children];
+  // Native Figma can remap node IDs while persisted composition links retain
+  // their previous values. Recover only a complete group in the same owner.
+  for(const node of [...cards,root]){
+    const marker=JSON.parse(node.getPluginData("orbit-motion"));
+    marker.referenceSourceIds=marker.referenceSourceIds.map((id:string)=>`old:${id}`);
+    if(marker.sourceId)marker.sourceId=`old:${marker.sourceId}`;
+    if(marker.serviceIds)marker.serviceIds=marker.serviceIds.map((id:string)=>`old:${id}`);
+    node.setPluginData("orbit-motion",JSON.stringify(marker));
+  }
+  await onMessage({type:"apply",settings});
+  assert(!nodes.has(root.id),"Refresh replaces the previous native output");
+  assert(before.every(node=>!nodes.has(node.id)),"Refresh removes old editable instances");
+  const refreshed=nodes.get(JSON.parse(cards[0].getPluginData("orbit-motion")).serviceIds[0]);
+  assert.equal(refreshed.opacity,0,"Refresh preserves the canvas/playback separation");
+  assert(cards.every(card=>card.visible&&card.opacity===1&&sampleTrack(card.manualKeyframeTracks.OPACITY,0)===0),"Refreshed originals remain editable on canvas and hidden during playback");
+  assert(refreshed.children.every((slot:any)=>{const card=slot.children.at(-1);return card.visible&&card.opacity===1&&card.manualKeyframeTracks.OPACITY?.baseValue.value===1;}),"Refresh restores visible copies and their opacity bases from hidden originals");
+  globalThis.figma.currentPage.selection=[cards[1]];
+  const currentRoot=nodes.get(JSON.parse(cards[0].getPluginData("orbit-motion")).serviceIds[0]);
+  const removeCurrentRoot=currentRoot.remove.bind(currentRoot);
+  currentRoot.remove=()=>{removeCurrentRoot();for(const card of cards)invalidatedSourceIds.add(card.id);};
+  failTrackRemoval={nodeId:cards[1].id,field:"OPACITY"};
+  const clearMessageStart=postedMessages.length;
+  await onMessage({type:"clear",scope:"selection"});
+  assert(!postedMessages.slice(clearMessageStart).some(message=>message.type==="result"&&message.kind==="error"),"One Clear recovers a transient native removal failure without reporting an error");
+  assert(cards.every(card=>card.visible&&card.opacity===1&&!card.getPluginData("orbit-motion")),"Clearing one linked source restores every original");
+}
+console.log(`Native reference export: all ${referencePresets.length} presets, sampled tracks, refresh and linked Clear passed`);
+for(const id of ["circle","orbit-3d-tilted","orbit-3d-helix","orbit-3d-eight"]){
+  const card=makeNode("Unified "+id);
+  parent.insertChild(parent.children.length,card);
+  globalThis.figma.currentPage.selection=[card];
+  const start=postedMessages.length;
+  await onMessage({type:"apply",settings:toMotionDocument(freshPreset(id))});
+  assert(!postedMessages.slice(start).some(m=>m.kind==="error"),id+": canonical Apply");
+  assert.equal(JSON.parse(card.getPluginData("orbit-motion")).settings.version,2);
+  await onMessage({type:"clear",scope:"selection"});
+  assert(!card.getPluginData("orbit-motion"),id+": canonical Clear");
+}
+
+const invalidMessageStart=postedMessages.length;
+await onMessage({type:"apply",settings:{version:2,preset:"circle"}});
+assert(postedMessages.slice(invalidMessageStart).some(message=>message.kind==="error"),"Malformed Apply returns an error instead of leaving UI busy");
+const nextMessageStart=postedMessages.length;
+await onMessage({type:"apply",settings:toMotionDocument(freshPreset("circle"))});
+assert(postedMessages.slice(nextMessageStart).some(message=>message.type==="result"),"Apply operation lock is released after invalid input");

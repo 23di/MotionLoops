@@ -3,7 +3,9 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
-for (const entry of ["src/engine.test-runner.ts", "src/plugin.test-runner.ts", "src/catalog.test-runner.ts"]) {
+// Match the Figma sandbox, which does not provide this browser API.
+globalThis.structuredClone = undefined;
+for (const entry of ["src/engine.test-runner.ts", "src/plugin.test-runner.ts", "src/catalog.test-runner.ts", "src/reference.test-runner.ts", "src/motion-system.test-runner.ts", "src/control-effects.test-runner.ts"]) {
   const result = await build({
     entryPoints: [resolve(root, entry)],
     bundle: true,

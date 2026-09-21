@@ -5,6 +5,9 @@ import {
   generateNodeKeyframes,
 } from "./engine";
 import { presetOptions } from "./types";
+import { referencePreset, referenceDefinition, activeReferencePresets } from "./reference-catalog";
+import { fromMotionDocument, toMotionDocument, validateMotionDocument } from "./motion-system";
+import { compileReference } from "./reference-tracks";
 import type {
   MotionSettings,
   PresetId,
@@ -53,19 +56,113 @@ interface OrbitMarker {
   blurEffect?: BlurEffect;
   effectsVersion?: number;
   baseOpacity?: number;
+  baseVisible?: boolean;
   centerOffset?: { x: number; y: number };
   settings?: MotionSettings;
+  referenceSourceIds?: string[];
 }
 
 figma.showUI(__html__, {
   width: pluginWidth,
   height: 580,
   themeColors: true,
-  title: "Orbit Animator",
+  title: "Motion Loops",
 });
 
 function post(message: PluginToUiMessage): void {
+  if (message.type === "result" && !message.diagnostics) {
+    message = { ...message, diagnostics: buildDiagnosticReport(message.kind === "error" ? message.message : null) };
+  }
   figma.ui.postMessage(message);
+}
+
+type DiagnosticDetails = Record<string, unknown>;
+type DiagnosticEntry = { elapsedMs: number; step: string; details?: DiagnosticDetails };
+let diagnosticStartedAt = 0;
+let diagnosticOperation = "idle";
+let diagnosticEntries: DiagnosticEntry[] = [];
+
+function beginDiagnostics(operation: string, details: DiagnosticDetails = {}): void {
+  diagnosticStartedAt = Date.now();
+  diagnosticOperation = operation;
+  diagnosticEntries = [];
+  logDiagnostic("operation.started", details);
+}
+
+function logDiagnostic(step: string, details?: DiagnosticDetails): void {
+  diagnosticEntries.push({
+    elapsedMs: Math.max(0, Date.now() - diagnosticStartedAt),
+    step,
+    ...(details ? { details } : {}),
+  });
+  if (diagnosticEntries.length > 200) diagnosticEntries.shift();
+}
+
+function technicalNodeState(node: SceneNode): DiagnosticDetails {
+  const marker = readOrbitMarker(node);
+  const parent = tryGetParent(node);
+  return {
+    id: node.id,
+    type: node.type,
+    name: node.name,
+    x: node.x,
+    y: node.y,
+    width: node.width,
+    height: node.height,
+    relativeTransform: node.relativeTransform,
+    absoluteTransform: node.absoluteTransform,
+    opacity: "opacity" in node ? node.opacity : null,
+    translationTracks: isMotionNode(node) ? {
+      x: node.manualKeyframeTracks.TRANSLATION_X ?? null,
+      y: node.manualKeyframeTracks.TRANSLATION_Y ?? null,
+    } : null,
+    parentId: parent?.id ?? null,
+    presentInParent: hasSceneChildren(parent)
+      ? parent.children.some((child) => child.id === node.id)
+      : false,
+    removed: "removed" in node ? node.removed : false,
+    locked: "locked" in node ? node.locked : false,
+    visible: "visible" in node ? node.visible : null,
+    marker: marker ? {
+      preset: marker.preset,
+      role: marker.role ?? null,
+      service: marker.service ?? false,
+      sourceId: marker.sourceId ?? null,
+      depthLayer: marker.depthLayer ?? null,
+      serviceIds: marker.serviceIds ?? [],
+      referenceSourceCount: marker.referenceSourceIds?.length ?? 0,
+    } : null,
+    tracks: isMotionNode(node)
+      ? animatedFields.filter((field) => Boolean(node.manualKeyframeTracks[field]))
+      : [],
+  };
+}
+
+function buildDiagnosticReport(error: unknown): string {
+  let selected: DiagnosticDetails[] = [];
+  let marked: DiagnosticDetails[] = [];
+  let markedTotal = 0;
+  try {
+    selected = figma.currentPage.selection.map(technicalNodeState);
+    const markedNodes = findMarkedPageNodes();
+    markedTotal = markedNodes.length;
+    marked = markedNodes.slice(0, 120).map(technicalNodeState);
+  } catch (snapshotError) {
+    logDiagnostic("snapshot.failed", {
+      error: snapshotError instanceof Error ? snapshotError.message : String(snapshotError),
+    });
+  }
+  return [
+    "Motion Loops diagnostics",
+    JSON.stringify({
+      schemaVersion: 2,
+      generatedAt: new Date().toISOString(),
+      operation: diagnosticOperation,
+      error: error == null ? null : error instanceof Error ? error.message : String(error),
+      events: diagnosticEntries,
+      state: { selected, marked, markedCount: markedTotal, truncated: markedTotal > marked.length },
+    }, null, 2),
+  ].join("\n");
 }
 
 function selectionSummary(): SelectionSummary {
@@ -77,7 +174,7 @@ function selectionSummary(): SelectionSummary {
   ]).find((node) => readOrbitMarker(node)?.role === "front");
   const animatedMarker = animatedTarget ? readOrbitMarker(animatedTarget) : null;
   const preset = animatedMarker?.preset;
-  const appliedPreset = preset && presetOptions.some((option) => option.value === preset)
+  const appliedPreset = preset && (presetOptions.some((option) => option.value === preset)||referencePreset(preset))
     ? preset as PresetId
     : null;
   const targetPreview = (scope: TargetScope) => {
@@ -88,7 +185,7 @@ function selectionSummary(): SelectionSummary {
       orbitCount: targets.filter(hasOrbitMotion).length,
       frameWidth: frameBounds?.width ?? 0,
       frameHeight: frameBounds?.height ?? 0,
-      items: targets.slice(0, 18).map((node) => {
+      items: targets.slice(0, 60).map((node) => {
         const centerOffset = frameCenterOffset(node);
         return {
           width: "width" in node && typeof node.width === "number" ? node.width : 1,
@@ -139,10 +236,18 @@ function readOrbitMarker(node: SceneNode): OrbitMarker | null {
     if (node.removed) return null;
     const value = node.getPluginData(orbitMarkerKey);
     if (!value) return null;
-    return JSON.parse(value) as OrbitMarker;
+    const marker=JSON.parse(value);
+    // Existing documents may contain historical values outside today's slider ranges.
+    // Reopening must not discard ownership/base-opacity metadata for those layers.
+    if(marker.settings?.version===2)marker.settings=fromMotionDocument(marker.settings);
+    return marker as OrbitMarker;
   } catch {
     return null;
   }
+}
+
+function serializeOrbitMarker(marker:OrbitMarker):string {
+  return JSON.stringify({...marker,...(marker.settings?{settings:toMotionDocument(marker.settings)}:{})});
 }
 
 function setOrbitRelaunch(node: BaseNode, marker?: OrbitMarker): void {
@@ -150,11 +255,11 @@ function setOrbitRelaunch(node: BaseNode, marker?: OrbitMarker): void {
     node.setRelaunchData({});
     return;
   }
-  const presetLabel = presetOptions.find((option) => option.value === marker.preset)?.label;
+  const presetLabel = referencePreset(marker.preset)?.label ?? presetOptions.find((option) => option.value === marker.preset)?.label;
   node.setRelaunchData({
     [editOrbitCommand]: presetLabel
-      ? `Edit ${presetLabel} animation in Orbit Animator`
-      : "Edit this animation in Orbit Animator",
+      ? `Edit ${presetLabel} animation in Motion Loops`
+      : "Edit this animation in Motion Loops",
   });
 }
 
@@ -219,6 +324,16 @@ function isOrbitService(node: SceneNode): boolean {
   return isBackCopy(node) || isServiceNamed(node);
 }
 
+function sameReferenceGroup(a: SceneNode,b: SceneNode):boolean {
+  const left=readOrbitMarker(a)?.referenceSourceIds,right=readOrbitMarker(b)?.referenceSourceIds;
+  return Boolean(left?.length&&right?.length&&left.length===right.length&&left.every(id=>right.includes(id))&&a.getTopLevelFrame()?.id===b.getTopLevelFrame()?.id);
+}
+
+function hasAllReferenceSources(target: MotionNode,targets: MotionNode[]):boolean {
+  const linked=readOrbitMarker(target)?.referenceSourceIds??[];
+  return !linked.length||linked.every(id=>targets.some(node=>node.id===id))||targets.filter(node=>sameReferenceGroup(target,node)).length===linked.length;
+}
+
 function isMotionNode(node: SceneNode): node is MotionNode {
   return (
     typeof (node as Partial<MotionNode>).applyManualKeyframeTrack === "function" &&
@@ -257,7 +372,9 @@ function resolveTargets(scope: TargetScope, includeLocked = false): MotionNode[]
     // Children/Deep mode would move the target one level farther down after
     // the previous Apply selected or left an animated container active.
     if (readOrbitMarker(node)?.role === "front") {
-      expanded.push(node);
+      const linked=readOrbitMarker(node)?.referenceSourceIds;
+      if(linked?.length){const marked=findMarkedPageNodes();for(const source of marked){if(linked.includes(source.id)||(readOrbitMarker(source)?.role==="front"&&sameReferenceGroup(node,source)))expanded.push(source);}}
+      else expanded.push(node);
     } else if (scope === "deep") {
       expanded.push(...collectDescendants(node, true, includeLocked));
     } else if (scope === "children" || isTimelineOwner(node)) {
@@ -279,7 +396,9 @@ function resolveTargets(scope: TargetScope, includeLocked = false): MotionNode[]
 }
 
 function hasOrbitMotion(node: MotionNode): boolean {
-  if (!node.getPluginData(orbitMarkerKey)) return false;
+  const marker=readOrbitMarker(node);
+  if (!marker) return false;
+  if(marker.role==="front"&&marker.referenceSourceIds?.length&&marker.serviceIds?.length)return true;
   return animatedFields.some((name) => Boolean(node.manualKeyframeTracks[name]));
 }
 
@@ -446,15 +565,28 @@ function sparseFloatTrack(
   } else {
     fit(0, frames.length - 1);
   }
-  return {
-    baseValue: { type: "FLOAT", value: baseValue },
-    keyframes: [...selected.entries()]
+  const keyframes: Array<{ timelinePosition: number; easing: MotionEasing; value: { type: "FLOAT"; value: number } }> = [];
+  for (const key of [...selected.entries()]
       .sort(([left], [right]) => left - right)
       .map(([index, easing]) => ({
-        timelinePosition: frames[index].time,
+        // Native Motion stores microsecond timestamps. Boundary brackets from
+        // compileReference can be closer than that, including at loop end.
+        timelinePosition: steppedState ? Math.round(frames[index].time * 1e6) / 1e6 : frames[index].time,
         easing,
-        value: { type: "FLOAT", value: values[index] },
-      })),
+        value: { type: "FLOAT" as const, value: values[index] },
+      }))) {
+    const previous = keyframes[keyframes.length - 1];
+    if (previous && previous.timelinePosition === key.timelinePosition) {
+      // Preserve the incoming step when the host merges coincident keys.
+      // Keeping the trailing LINEAR key would fade an inactive copy across
+      // the entire preceding interval instead of switching it at the seam.
+      key.easing = previous.value.value !== key.value.value ? holdEasing : previous.easing;
+      keyframes[keyframes.length - 1] = key;
+    } else keyframes.push(key);
+  }
+  return {
+    baseValue: { type: "FLOAT", value: baseValue },
+    keyframes,
   };
 }
 
@@ -533,7 +665,7 @@ async function findBackCopies(
       if (
         (marker?.role === "back" || sameNamedService) &&
         (
-          marker?.sourceId === source.id ||
+          marker?.sourceId === source.id || sameReferenceGroup(source,candidate) ||
           (!marker?.sourceId && (
             candidate.id === preferredPairId || preferredIds.has(candidate.id)
           )) ||
@@ -566,7 +698,18 @@ async function findBackCopies(
     const paired = await figma.getNodeByIdAsync(preferredPairId);
     if (paired && paired.type !== "DOCUMENT" && paired.type !== "PAGE") collect(paired, false);
   }
-  return [...copies.values()];
+  // Page-scan proxies and persisted pair IDs may refer to an older identity
+  // of the same service. Count only freshly resolved scene nodes, once per ID.
+  const liveCopies=new Map<string,MotionNode>();
+  for(const id of copies.keys()){
+    const candidate=await figma.getNodeByIdAsync(id);
+    if(!candidate||candidate.type==="DOCUMENT"||candidate.type==="PAGE"||!isMotionNode(candidate)||!isLiveNode(candidate))continue;
+    const owner=tryGetParent(candidate);
+    if(!hasSceneChildren(owner)||!owner.children.some(child=>child.id===candidate.id))continue;
+    if(claimedServiceIds?.has(candidate.id))continue;
+    liveCopies.set(candidate.id,candidate);
+  }
+  return [...liveCopies.values()];
 }
 
 function trySetLocked(node: MotionNode, locked: boolean): boolean {
@@ -783,8 +926,11 @@ function prepareTransformTracks(
     ? sampledFloatTrack(baseValue, frames, value)
     : sparseFloatTrack(baseValue, frames, value, tolerance);
   return [
-    { name: "TRANSLATION_X", track: track(centerOffset.x, (frame) => centerOffset.x + frame.x, 0.75) },
-    { name: "TRANSLATION_Y", track: track(centerOffset.y, (frame) => centerOffset.y + frame.y, 0.75) },
+    // Translation bases describe the resting artwork, not the orbit center.
+    // A nonzero base survives track removal in the live Figma renderer and
+    // makes the artwork disagree with its selection bounds after Clear.
+    { name: "TRANSLATION_X", track: track(0, (frame) => centerOffset.x + frame.x, 0.75) },
+    { name: "TRANSLATION_Y", track: track(0, (frame) => centerOffset.y + frame.y, 0.75) },
     { name: "SCALE_X", track: track(1, (frame) => frame.scaleX, 0.003) },
     { name: "SCALE_Y", track: track(1, (frame) => frame.scaleY, 0.003) },
     { name: "ROTATION", track: track(0, (frame) => frame.rotation, 0.25) },
@@ -825,6 +971,7 @@ function sourceBaseOpacity(node: MotionNode): number {
 }
 
 function restoreSourceOpacity(node: MotionNode, marker: OrbitMarker | null): void {
+  if(typeof marker?.baseVisible==="boolean")node.visible=marker.baseVisible;
   if (!("opacity" in node)) return;
   node.opacity = typeof marker?.baseOpacity === "number" ? marker.baseOpacity : 1;
 }
@@ -897,7 +1044,157 @@ function setTimelineDurations(
   }
 }
 
+async function applyReferenceMotion(settings: MotionSettings): Promise<void> {
+  const definition=referenceDefinition(settings)!;
+  const presetLabel=(activeReferencePresets.find(preset=>preset.id===settings.preset)??referencePreset(settings.preset))?.label??definition.label;
+  const targets=resolveTargets(settings.other.scope);
+  logDiagnostic("reference.targets", {
+    preset: settings.preset,
+    scope: settings.other.scope,
+    targetIds: targets.map((node) => node.id),
+    targetCount: targets.length,
+  });
+  if(targets.length<definition.minSlots||targets.length>definition.maxSlots)throw new Error(`${definition.label} needs ${definition.minSlots}–${definition.maxSlots} selected cards.`);
+  const owner=targets[0].getTopLevelFrame();
+  if(!owner||targets.some(node=>node.getTopLevelFrame()?.id!==owner.id))throw new Error("Select cards in one top-level frame.");
+  const sourceIds=targets.map(node=>node.id),ownerId=owner.id,width=owner.width,height=owner.height;
+  for(const target of targets){
+    if(!hasAllReferenceSources(target,targets))throw new Error("Select and unlock all cards of this animation before refreshing it.");
+  }
+  const snapshots=targets.map(node=>({id:node.id,name:node.name,width:node.width,height:node.height,opacity:sourceBaseOpacity(node),previousOpacity:"opacity" in node?node.opacity:1,marker:node.getPluginData(orbitMarkerKey),tracks:animatedFields.flatMap(name=>{const track=node.manualKeyframeTracks[name];return track?[{name,track:JSON.parse(JSON.stringify({baseValue:track.baseValue,keyframes:track.keyframes})) as ManualKeyframeTrackInput}]:[]})}));
+  const instances=compileReference(settings,snapshots,width,height);
+  logDiagnostic("reference.compiled", { sourceCount: snapshots.length, instanceCount: instances.length });
+  if(!instances.length)throw new Error("This composition produced no visible cards. Adjust the Row settings before applying.");
+  const visibility=new Map(targets.map(node=>[node.id,{previous:node.visible,base:readOrbitMarker(node)?.baseVisible??node.visible}]));
+  const oldServices=new Set<string>();
+  const marked=findMarkedPageNodes();
+  for(const node of targets)for(const copy of await findBackCopies(node,true,marked))oldServices.add(copy.id);
+  const root=figma.createFrame();root.name=`${presetLabel} · Orbit native (service)`;root.resize(width,height);root.fills=[];root.clipsContent=true;
+  const rootId=root.id;
+  // Build the entire replacement before touching originals or old services.
+  try {
+    const freshOwner=await figma.getNodeByIdAsync(ownerId);
+    if(!freshOwner||freshOwner.type!=="FRAME")throw new Error("The containing frame became unavailable.");
+    freshOwner.appendChild(root);
+    const placed=await figma.getNodeByIdAsync(rootId) as FrameNode;
+    if(freshOwner.layoutMode!=="NONE")placed.layoutPositioning="ABSOLUTE";
+    placed.relativeTransform=[[1,0,0],[0,1,0]];
+    // Keep the editable source layout on the design canvas. Service slots all
+    // rest at the center; their composition exists only on the Motion timeline.
+    placed.opacity=0;
+    placed.applyManualKeyframeTrack({type:"PROPERTY",name:"OPACITY"},{baseValue:{type:"FLOAT",value:0},keyframes:[{timelinePosition:0,easing:linearEasing,value:{type:"FLOAT",value:1}}]});
+    placed.setPluginData(orbitMarkerKey,JSON.stringify({version:2,preset:settings.preset,role:"back",service:true,sourceId:sourceIds[0],referenceSourceIds:sourceIds} satisfies OrbitMarker));
+    const timelines=new Set<string>();
+    const slotIds:string[]=[];
+    for(const instance of instances){
+      const source=snapshots[instance.source];
+      const slot=figma.createFrame();slot.name=`${source.name} · layer ${instance.layer+1}`;slot.resize(instance.baseWidth,instance.baseHeight);slot.fills=[];slot.clipsContent=true;
+      const slotId=slot.id;
+      slotIds.push(slotId);
+      (await figma.getNodeByIdAsync(rootId) as FrameNode).appendChild(slot);
+      const hasShade=instance.frames.some(frame=>frame.shade>0);
+      if(hasShade){
+        const backing=figma.createRectangle();backing.name="Depth backing";backing.resize(instance.baseWidth,instance.baseHeight);backing.fills=[{type:"SOLID",color:{r:0,g:0,b:0}}];
+        const backingId=backing.id;(await figma.getNodeByIdAsync(slotId) as FrameNode).appendChild(backing);
+        const backdrop=await figma.getNodeByIdAsync(backingId) as RectangleNode;backdrop.relativeTransform=[[1,0,0],[0,1,0]];
+        backdrop.applyManualKeyframeTrack({type:"PROPERTY",name:"OPACITY"},sampledFloatTrack(0,instance.frames,frame=>(frame as typeof instance.frames[number]).shade>0?1:0,frame=>(frame as typeof instance.frames[number]).shade>0));
+      }
+      const freshSource=await figma.getNodeByIdAsync(source.id);
+      if(!freshSource||freshSource.type==="DOCUMENT"||freshSource.type==="PAGE")throw new Error("A source card became unavailable.");
+      const clone=freshSource.clone();const cloneId=clone.id;
+      (await figma.getNodeByIdAsync(slotId) as FrameNode).appendChild(clone);
+      const card=await figma.getNodeByIdAsync(cloneId) as SceneNode;
+      if(!("opacity" in card)||!("rotation" in card)||!("rescale" in card))throw new Error("This source type cannot be used as an editable card.");
+      if(isMotionNode(card)&&!clearAnimatedTracksSafely(card))throw new Error(`Could not reset motion on the copy of ${source.name}.`);
+      card.setPluginData(orbitMarkerKey,"");card.opacity=source.opacity;card.visible=visibility.get(source.id)!.base;card.rotation=0;
+      // Native Motion proxies can lose X when Y is assigned next. Commit both
+      // coordinates together so the cloned source stays inside its clipping slot.
+      card.relativeTransform=[[1,0,(instance.baseWidth-card.width)/2],[0,1,(instance.baseHeight-card.height)/2]];
+      // Removing inherited Orbit tracks leaves their evaluated transforms cached
+      // in the live Motion player. Explicit identity tracks keep the artwork
+      // centered inside its clipping slot when switching an existing animation.
+      if(isMotionNode(card))for(const name of ["TRANSLATION_X","TRANSLATION_Y","ROTATION","SCALE_X","SCALE_Y"] as const){
+        const value={type:"FLOAT" as const,value:name.startsWith("SCALE")?1:0};
+        card.applyManualKeyframeTrack({type:"PROPERTY",name},{baseValue:value,keyframes:[{timelinePosition:0,value,easing:{type:"HOLD"}}]});
+      }
+      if(instance.fill&&isMotionNode(card))for(const [name,key] of [["SCALE_X","imageScaleX"],["SCALE_Y","imageScaleY"]] as const)card.applyManualKeyframeTrack({type:"PROPERTY",name},sampledFloatTrack(1,instance.frames,frame=>(frame as typeof instance.frames[number])[key]));
+      if(isMotionNode(card))card.applyManualKeyframeTrack({type:"PROPERTY",name:"OPACITY"},sampledFloatTrack(source.opacity,instance.frames,frame=>{const native=frame as typeof instance.frames[number];return source.opacity*(1-native.shade)*native.alpha;}));
+      const wrapper=await figma.getNodeByIdAsync(slotId) as FrameNode;
+      const wrapperX=(width-instance.baseWidth)/2,wrapperY=(height-instance.baseHeight)/2;
+      wrapper.relativeTransform=[[1,0,wrapperX],[0,1,wrapperY]];
+      if(!isMotionNode(wrapper))throw new Error("This Figma version does not support native Motion tracks on frames.");
+      // Motion translation is additive to the resting transform. The wrapper
+      // is already centered; compiled positions are offsets from that center.
+      const transforms=prepareTransformTracks(instance.frames,{x:0,y:0},true);
+      applyTracks(wrapper,instance.frames,transforms,1,frame=>frame.opacity,frame=>frame.opacity>0,true);
+      const corner=sparseFloatTrack(0,instance.frames,frame=>(frame as typeof instance.frames[number]).radius,.01);
+      for(const name of ["RECTANGLE_TOP_LEFT_CORNER_RADIUS","RECTANGLE_TOP_RIGHT_CORNER_RADIUS","RECTANGLE_BOTTOM_LEFT_CORNER_RADIUS","RECTANGLE_BOTTOM_RIGHT_CORNER_RADIUS"] as const)wrapper.applyManualKeyframeTrack({type:"PROPERTY",name},corner);
+      setTimelineDurations(wrapper,settings.motion.duration,timelines);
+    }
+    // Motion writes can invalidate the append position in the native runtime.
+    // Commit the intended back-to-front ordering explicitly after all tracks.
+    for(let index=0;index<slotIds.length;index++){
+      const parent=await figma.getNodeByIdAsync(rootId) as FrameNode;
+      const slot=await figma.getNodeByIdAsync(slotIds[index]) as FrameNode;
+      parent.insertChild(index,slot);
+    }
+    for(const source of snapshots){
+      const node=await figma.getNodeByIdAsync(source.id);
+      if(!node||node.type==="DOCUMENT"||node.type==="PAGE"||!isMotionNode(node))throw new Error("A source card became unavailable before commit.");
+      if(!clearAnimatedTracksSafely(node))throw new Error(`Could not replace motion on ${source.name}.`);
+      if("opacity" in node)node.opacity=source.opacity;
+      node.visible=visibility.get(source.id)!.base;
+      // Motion playback can retain its own opacity base after a previous
+      // animation. Hide them only during playback; retain their canvas state.
+      node.applyManualKeyframeTrack({type:"PROPERTY",name:"OPACITY"},{baseValue:{type:"FLOAT",value:source.opacity},keyframes:[{timelinePosition:0,easing:linearEasing,value:{type:"FLOAT",value:0}}]});
+      const marker:OrbitMarker={version:2,preset:settings.preset,role:"front",baseOpacity:source.opacity,baseVisible:visibility.get(source.id)!.base,serviceIds:[rootId],referenceSourceIds:sourceIds,settings};
+      node.setPluginData(orbitMarkerKey,serializeOrbitMarker(marker));setOrbitRelaunch(node,marker);
+    }
+    const completed=await figma.getNodeByIdAsync(rootId);if(completed&&completed.type!=="DOCUMENT"&&completed.type!=="PAGE")trySetLocked(completed,true);
+  }catch(error){
+    logDiagnostic("reference.write.failed", {
+      rootId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    const failed=await figma.getNodeByIdAsync(rootId);if(failed&&failed.type!=="DOCUMENT"&&failed.type!=="PAGE")await removeNodeSafely(failed);
+    const recoveryErrors:string[]=[];
+    for(const source of snapshots){
+      try{
+        const node=await figma.getNodeByIdAsync(source.id);
+        if(node&&node.type!=="DOCUMENT"&&node.type!=="PAGE"){
+          if(isMotionNode(node)){clearAnimatedTracksSafely(node);for(const saved of source.tracks)node.applyManualKeyframeTrack({type:"PROPERTY",name:saved.name},saved.track);}
+          if("opacity" in node)node.opacity=source.previousOpacity;node.visible=visibility.get(source.id)!.previous;node.setPluginData(orbitMarkerKey,source.marker);
+          if(isMotionNode(node))setOrbitRelaunch(node,readOrbitMarker(node)??undefined);
+        }
+      }catch{recoveryErrors.push(source.name);}
+    }
+    if(recoveryErrors.length)throw new Error(`Update failed; could not restore ${recoveryErrors.join(", ")}. Undo this operation in Figma.`);
+    throw error;
+  }
+  for(const id of oldServices){const node=await figma.getNodeByIdAsync(id);if(node&&node.type!=="DOCUMENT"&&node.type!=="PAGE")await removeNodeSafely(node);}
+  logDiagnostic("reference.completed", { rootId, removedOldServices: oldServices.size });
+  post({type:"result",kind:"success",message:`${presetLabel}: ${targets.length} cards, ${instances.length} editable native instances.`});
+  post({type:"selection",selection:selectionSummary()});
+}
+
 async function applyMotion(settings: MotionSettings): Promise<void> {
+  const nativeDefinition = referenceDefinition(settings);
+  logDiagnostic("apply.route", {
+    preset: settings.preset,
+    renderer: nativeDefinition ? "reference" : "trajectory",
+    shape: settings.geometry.shape,
+    scope: settings.other.scope,
+    serviceLayers: settings.other.serviceLayers,
+  });
+  if(nativeDefinition)return applyReferenceMotion(settings);
+  // Native compositions must not be mistaken for reusable depth-copy cards.
+  const replacementTargets=resolveTargets(settings.other.scope);
+  const referenceTargets=replacementTargets.filter(node=>readOrbitMarker(node)?.referenceSourceIds?.length);
+  for(const node of referenceTargets)if(!hasAllReferenceSources(node,replacementTargets))throw new Error("Unlock all cards of the native animation before replacing it.");
+  const referenceRoots=new Set(referenceTargets.flatMap(node=>readOrbitMarker(node)?.serviceIds??[]));
+  for(const node of referenceTargets)for(const root of await findBackCopies(node,true))referenceRoots.add(root.id);
+  for(const node of referenceTargets){const marker=readOrbitMarker(node);restoreSourceOpacity(node,marker);node.setPluginData(orbitMarkerKey,"");setOrbitRelaunch(node);}
+  for(const id of referenceRoots){const root=await figma.getNodeByIdAsync(id);if(root&&root.type!=="DOCUMENT"&&root.type!=="PAGE")await removeNodeSafely(root);}
   // Locking a layer is also a way to opt it out on refresh. If it was animated
   // earlier, remove only Orbit-owned tracks/copies instead of leaving stale
   // motion running while the layer is skipped.
@@ -926,6 +1223,12 @@ async function applyMotion(settings: MotionSettings): Promise<void> {
   for (const container of lockedContainers) syncContainerRelaunch(container);
 
   const targets = resolveTargets(settings.other.scope);
+  logDiagnostic("trajectory.targets", {
+    targetIds: targets.map((node) => node.id),
+    targetCount: targets.length,
+    markedPageCount: markedPageNodes.length,
+    replacedReferenceCount: referenceTargets.length,
+  });
   if (targets.length === 0) {
     if (figma.currentPage.selection.some((node) => "locked" in node && node.locked)) {
       throw new Error("Locked layers are ignored. Unlock a layer to animate it.");
@@ -943,6 +1246,7 @@ async function applyMotion(settings: MotionSettings): Promise<void> {
     parentId: string;
     layer: number;
     target: number;
+    sourceId: string;
   }> = [];
   const targetIds = targets.map((target) => target.id);
   const pendingRemovalIds = new Set<string>();
@@ -956,6 +1260,7 @@ async function applyMotion(settings: MotionSettings): Promise<void> {
     settings.appearance.farBlur > 0 || settings.appearance.frontShadow > 0 ? 2 : 0,
   );
   const useDepthLayers = layerCount > 1;
+  logDiagnostic("trajectory.layers", { configuredLayers, layerCount, useDepthLayers });
 
   for (let index = 0; index < targetIds.length; index += 1) {
     const targetId = targetIds[index];
@@ -978,6 +1283,7 @@ async function applyMotion(settings: MotionSettings): Promise<void> {
       frameBounds?.height ?? 0,
       nodeWidth,
       nodeHeight,
+      targets.length,
     );
     const frames = generateNodeKeyframes({
       ...fittedSettings,
@@ -998,6 +1304,7 @@ async function applyMotion(settings: MotionSettings): Promise<void> {
       let createdIds: string[] = [];
       let claimedAttemptIds: string[] = [];
       try {
+        logDiagnostic("trajectory.target.attempt", { targetId, attempt: attempt + 1 });
         const freshSource = await figma.getNodeByIdAsync(targetId);
         if (
           !freshSource || freshSource.type === "DOCUMENT" || freshSource.type === "PAGE" ||
@@ -1019,6 +1326,13 @@ async function applyMotion(settings: MotionSettings): Promise<void> {
           claimedAttemptIds = [...backCopyIds];
           createdIds = ensured.createdIds;
           surplusIds = ensured.surplusIds;
+          logDiagnostic("trajectory.services.prepared", {
+            targetId,
+            attempt: attempt + 1,
+            serviceIds: backCopyIds,
+            createdIds,
+            surplusIds,
+          });
 
           for (let layer = 0; layer < backCopyIds.length; layer += 1) {
             const copyId = backCopyIds[layer];
@@ -1114,7 +1428,7 @@ async function applyMotion(settings: MotionSettings): Promise<void> {
           centerOffset: originalCenterOffset,
           settings,
         } satisfies OrbitMarker;
-        sourceForTracks.setPluginData(orbitMarkerKey, JSON.stringify(sourceMarker));
+        sourceForTracks.setPluginData(orbitMarkerKey, serializeOrbitMarker(sourceMarker));
         setOrbitRelaunch(sourceForTracks, sourceMarker);
 
         for (const id of surplusIds) pendingRemovalIds.add(id);
@@ -1125,13 +1439,22 @@ async function applyMotion(settings: MotionSettings): Promise<void> {
               parentId: targetParentId,
               layer,
               target: index,
+              sourceId: targetId,
             });
           }
         }
         changed.push(targetId);
         completed = true;
+        logDiagnostic("trajectory.target.completed", { targetId, serviceCount: backCopyIds.length });
       } catch (error) {
         lastError = error;
+        logDiagnostic("trajectory.target.failed", {
+          targetId,
+          attempt: attempt + 1,
+          createdIds,
+          claimedIds: claimedAttemptIds,
+          error: error instanceof Error ? error.message : String(error),
+        });
         for (const id of claimedAttemptIds) claimedServiceIds.delete(id);
         for (const id of createdIds) {
           const created = await figma.getNodeByIdAsync(id);
@@ -1161,49 +1484,128 @@ async function applyMotion(settings: MotionSettings): Promise<void> {
     }
   }
 
+  // Track writes can remap the owning frame as well as every service node. Do
+  // one fresh page inventory before grouping, otherwise the first card can be
+  // grouped under the frame's old id while later cards use its replacement id.
+  for (const item of serviceOrder) {
+    const source = await figma.getNodeByIdAsync(item.sourceId);
+    let parent = source && source.type !== "DOCUMENT" && source.type !== "PAGE"
+      ? tryGetParent(source)
+      : null;
+    // Old source aliases normally resolve to the replacement node. If Figma
+    // drops that alias entirely, recover the frame from the semantic service.
+    if (!isSceneContainer(parent)) {
+      const service = findMarkedPageNodes().find((node) => {
+        const marker = readOrbitMarker(node);
+        return marker?.role === "back" && marker.sourceId === item.sourceId &&
+          marker.depthLayer === item.layer;
+      });
+      parent = service ? tryGetParent(service) : null;
+    }
+    if (!isSceneContainer(parent)) {
+      throw new Error("Update verification failed: a source parent is unavailable.");
+    }
+    item.parentId = parent.id;
+  }
+
   const parentIds = new Set(serviceOrder.map(({ parentId }) => parentId));
   for (const parentId of parentIds) {
     const ordered = serviceOrder
       .filter((item) => item.parentId === parentId)
       .sort((left, right) => left.layer - right.layer || left.target - right.target);
-    const desiredIds = ordered.map(({ nodeId }) => nodeId);
+    const matchesItem = (node: SceneNode, item: typeof ordered[number]): boolean => {
+      const marker = readOrbitMarker(node);
+      return marker?.role === "back" && marker.sourceId === item.sourceId &&
+        marker.depthLayer === item.layer;
+    };
+    const semanticOrder = (parent: SceneNode & ChildrenMixin): boolean => (
+      ordered.every((item, index) => {
+        const node = parent.children[index];
+        return Boolean(node && matchesItem(node, item));
+      })
+    );
+    const describeOrder = (parent: SceneNode & ChildrenMixin) => parent.children
+      .slice(0, ordered.length)
+      .map((node) => {
+        const marker = readOrbitMarker(node);
+        return { id: node.id, sourceId: marker?.sourceId ?? null, layer: marker?.depthLayer ?? null };
+      });
+    let currentParentId = parentId;
+    const resolveCurrentParent = async (): Promise<(SceneNode & ChildrenMixin) | null> => {
+      for (const id of new Set([currentParentId, parentId])) {
+        const candidate = await figma.getNodeByIdAsync(id);
+        if (isSceneContainer(candidate)) {
+          currentParentId = candidate.id;
+          return candidate;
+        }
+      }
+      // If both aliases expired, recover the frame from any semantic service.
+      const service = findMarkedPageNodes().find((node) => matchesItem(node, ordered[0]));
+      const candidate = service ? tryGetParent(service) : null;
+      if (!isSceneContainer(candidate)) return null;
+      currentParentId = candidate.id;
+      return candidate;
+    };
+    const initialParent = await resolveCurrentParent();
+    if (!initialParent) throw new Error("Update verification failed: a source parent is unavailable.");
+    logDiagnostic("trajectory.ordering.started", {
+      parentId,
+      currentParentId,
+      desired: ordered.map(({ sourceId, layer }) => ({ sourceId, layer })),
+      actual: describeOrder(initialParent),
+    });
     let orderedCorrectly = false;
+    let orderingError="";
     for (let attempt = 0; attempt < 2 && !orderedCorrectly; attempt += 1) {
-      const parent = await figma.getNodeByIdAsync(parentId);
-      if (!hasSceneChildren(parent)) break;
-      const currentIds = parent.children
-        .slice(0, desiredIds.length)
-        .map((node) => node.id);
-      orderedCorrectly = desiredIds.every((id, index) => currentIds[index] === id);
+      const parent = await resolveCurrentParent();
+      if (!parent) break;
+      orderedCorrectly = semanticOrder(parent);
       if (orderedCorrectly) break;
 
-      for (const { nodeId } of [...ordered].reverse()) {
-        const node = await figma.getNodeByIdAsync(nodeId);
-        const freshParent = await figma.getNodeByIdAsync(parentId);
-        if (
-          !node || node.type === "DOCUMENT" || node.type === "PAGE" ||
-          !isMotionNode(node) || !isLiveNode(node) || !hasSceneChildren(freshParent)
-        ) {
-          break;
-        }
+      for (const [index, item] of ordered.entries()) {
         try {
-          freshParent.insertChild(0, node);
-        } catch {
+          let destination = await resolveCurrentParent();
+          if (!destination) throw new Error("Service parent became unavailable while ordering.");
+          let movable = destination.children.find((node) => matchesItem(node, item));
+          if (!movable || !isMotionNode(movable) || !isLiveNode(movable)) {
+            throw new Error("Service layer became unavailable while ordering.");
+          }
+          const wasLocked = movable.locked;
+          trySetLocked(movable, false);
+          // Unlocking and inserting may remap the whole subtree. Resolve both
+          // objects semantically after every mutation instead of retaining IDs.
+          destination = await resolveCurrentParent();
+          movable = destination?.children.find((node) => matchesItem(node, item));
+          if (!destination || !movable || !isMotionNode(movable) || !isLiveNode(movable)) {
+            throw new Error("Service layer became unavailable while ordering.");
+          }
+          destination.insertChild(index, movable);
+          const reorderedParent = await resolveCurrentParent();
+          const reordered = reorderedParent?.children.find((node) => matchesItem(node, item));
+          if (reordered && isMotionNode(reordered)) trySetLocked(reordered, wasLocked);
+        } catch (error) {
+          orderingError=error instanceof Error?error.message:String(error);
           // Retry the whole ordering pass with freshly resolved proxies.
           break;
         }
       }
     }
-    const verifiedParent = await figma.getNodeByIdAsync(parentId);
-    if (!hasSceneChildren(verifiedParent)) {
+    const verifiedParent = await resolveCurrentParent();
+    if (!verifiedParent) {
       throw new Error("Update verification failed: a source parent is unavailable.");
     }
-    const verifiedOrder = verifiedParent.children
-      .slice(0, desiredIds.length)
-      .map((node) => node.id);
-    if (!desiredIds.every((id, index) => verifiedOrder[index] === id)) {
-      throw new Error("Update verification failed: service layers could not be ordered safely.");
+    const verifiedOrder = describeOrder(verifiedParent);
+    if (!semanticOrder(verifiedParent)) {
+      logDiagnostic("trajectory.ordering.failed", {
+        parentId,
+        currentParentId,
+        desired: ordered.map(({ sourceId, layer }) => ({ sourceId, layer })),
+        actual: verifiedOrder,
+        orderingError,
+      });
+      throw new Error(`Update verification failed: service layers could not be ordered safely.${orderingError?` ${orderingError}`:""}`);
     }
+    logDiagnostic("trajectory.ordering.completed", { parentId, currentParentId, actual: verifiedOrder });
   }
 
   // Never report success for a split front track without its complete service
@@ -1223,6 +1625,11 @@ async function applyMotion(settings: MotionSettings): Promise<void> {
       verifiedPageNodes,
     )).filter(isLiveNode);
     const expectedCopies = useDepthLayers ? layerCount - 1 : 0;
+    logDiagnostic("trajectory.verification", {
+      sourceId: targetId,
+      expectedCopies,
+      actualCopyIds: verifiedCopies.map((copy) => copy.id),
+    });
     if (verifiedCopies.length !== expectedCopies) {
       throw new Error(
         `Update verification failed for ${verifiedSource.name}: expected ${expectedCopies} service layer${expectedCopies === 1 ? "" : "s"}, found ${verifiedCopies.length}.`,
@@ -1254,6 +1661,8 @@ async function applyMotion(settings: MotionSettings): Promise<void> {
     throw new Error(failures[0] ?? "Figma Motion is unavailable for this selection.");
   }
 
+  logDiagnostic("trajectory.completed", { changedCount: changed.length, failureCount: failures.length });
+
   post({
     type: "result",
     kind: "success",
@@ -1264,7 +1673,8 @@ async function applyMotion(settings: MotionSettings): Promise<void> {
   sendSelection();
 }
 
-async function clearMotion(_scope: TargetScope): Promise<void> {
+async function clearMotion(_scope: TargetScope, recoveryAttempt=false): Promise<void> {
+  logDiagnostic("clear.pass.started", { scope: _scope, recoveryAttempt });
   // Clear owns cleanup, not targeting. Selecting a parent must clear every
   // Orbit source and service descendant even if the UI currently says
   // Selection or an earlier preset stored a different scope.
@@ -1286,6 +1696,10 @@ async function clearMotion(_scope: TargetScope): Promise<void> {
     if (isOrbitService(node)) servicesInScope.set(node.id, node);
     else if (!isTimelineOwner(node)) motionInScope.set(node.id, node);
   }
+  // One reference animation is a shared composition. Clearing any linked card
+  // must restore every original, rather than removing the shared output only.
+  const linkedIds=new Set([...scopedNodes.values()].flatMap(node=>readOrbitMarker(node)?.referenceSourceIds??[]));
+  for(const node of markedPageNodes)if((linkedIds.has(node.id)||[...scopedNodes.values()].some(source=>sameReferenceGroup(source,node)))&&isMotionNode(node)&&!isOrbitService(node))motionInScope.set(node.id,node);
 
   const orbitTargetsById = new Map<string, MotionNode>();
   for (const node of motionInScope.values()) {
@@ -1326,12 +1740,20 @@ async function clearMotion(_scope: TargetScope): Promise<void> {
   }
 
   const orbitTargets = [...orbitTargetsById.values()];
+  logDiagnostic("clear.inventory", {
+    selectedIds: figma.currentPage.selection.map((node) => node.id),
+    scopedCount: scopedNodes.size,
+    markedPageCount: markedPageNodes.length,
+    targetIds: orbitTargets.map((node) => node.id),
+    serviceIds: [...servicesInScope.keys()],
+  });
   if (orbitTargets.length === 0 && servicesInScope.size === 0) {
-    throw new Error("No Orbit Animator motion in the current selection.");
+    throw new Error("No Motion Loops motion in the current selection.");
   }
 
   let cleared = 0;
   let failures = 0;
+  const failureDetails:string[]=[];
   const protectedServiceIds = new Set<string>();
   const removedServiceIds = new Set<string>();
   const orbitTargetIds = orbitTargets.map((node) => node.id);
@@ -1380,10 +1802,19 @@ async function clearMotion(_scope: TargetScope): Promise<void> {
         failures += 1;
         continue;
       }
-      resolved.setPluginData(orbitMarkerKey, "");
-      setOrbitRelaunch(resolved);
+      // Removing a shared native service invalidates previously held source
+      // proxies in Figma. Resolve the surviving original again before commit.
+      const committed=await figma.getNodeByIdAsync(nodeId);
+      if(!committed||committed.type==="DOCUMENT"||committed.type==="PAGE"||!isMotionNode(committed))throw new Error("The source became unavailable during Clear.");
+      committed.setPluginData(orbitMarkerKey, "");
+      setOrbitRelaunch(committed);
       cleared += 1;
-    } catch {
+    } catch (error) {
+      logDiagnostic("clear.target.failed", {
+        nodeId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      failureDetails.push(`${nodeId}: ${error instanceof Error?error.message:String(error)}`);
       failures += 1;
     }
   }
@@ -1410,8 +1841,15 @@ async function clearMotion(_scope: TargetScope): Promise<void> {
     if (isSceneContainer(container)) syncContainerRelaunch(container);
   }
   if (failures > 0) {
+    // Native mutations can invalidate proxies mid-pass. Incomplete originals
+    // retain their markers, so a single fresh pass safely completes the same
+    // user-requested Clear without requiring another click.
+    if(!recoveryAttempt){
+      logDiagnostic("clear.recovery.requested", { failures, failureDetails });
+      return clearMotion(_scope,true);
+    }
     throw new Error(
-      `Clear stopped before completing ${failures} layer${failures === 1 ? "" : "s"}. Run Clear again; unfinished Orbit data was preserved for recovery.`,
+      `Clear stopped before completing ${failures} layer${failures === 1 ? "" : "s"}. Run Clear again; unfinished Motion Loops data was preserved for recovery. ${failureDetails.join("; ")}`,
     );
   }
 
@@ -1428,7 +1866,7 @@ async function clearMotion(_scope: TargetScope): Promise<void> {
       throw new Error(`Clear verification failed for ${source.name}: animation tracks remain.`);
     }
     if (readOrbitMarker(source)) {
-      throw new Error(`Clear verification failed for ${source.name}: Orbit metadata remains.`);
+      throw new Error(`Clear verification failed for ${source.name}: Motion Loops metadata remains.`);
     }
     const remainingCopies = (await findBackCopies(source, true, remainingMarkedNodes)).filter(isLiveNode);
     if (remainingCopies.length > 0) {
@@ -1443,8 +1881,9 @@ async function clearMotion(_scope: TargetScope): Promise<void> {
     }
   }
   if (cleared === 0 && removedServiceIds.size === 0) {
-    throw new Error("Orbit Animator could not clear motion from the selected layers.");
+    throw new Error("Motion Loops could not clear motion from the selected layers.");
   }
+  logDiagnostic("clear.completed", { cleared, removedServiceCount: removedServiceIds.size });
   post({
     type: "result",
     kind: "success",
@@ -1458,9 +1897,28 @@ let operationInProgress = false;
 figma.ui.onmessage = async (message: UiToPluginMessage) => {
   const startsOperation = message.type === "apply" || message.type === "clear";
   if (startsOperation && operationInProgress) return;
-  if (startsOperation) operationInProgress = true;
   try {
-    if (message.type === "apply") await applyMotion(message.settings);
+    if (startsOperation) {
+      operationInProgress = true;
+      if (message.type === "apply") {
+        const raw = message.settings as MotionSettings & {
+          version?: number;
+          model?: string;
+          parameters?: Record<string, unknown>;
+        };
+        beginDiagnostics("apply", {
+          settings: message.settings,
+          preset: raw?.preset,
+          model: raw?.model ?? raw?.renderer ?? "trajectory",
+          shape: raw?.parameters?.shape ?? raw?.geometry?.shape ?? null,
+          scope: raw?.other?.scope,
+          serviceLayers: raw?.other?.serviceLayers,
+        });
+      } else {
+        beginDiagnostics("clear", { scope: message.scope });
+      }
+    }
+    if (message.type === "apply") await applyMotion("version" in message.settings ? fromMotionDocument(validateMotionDocument(message.settings)) : message.settings);
     if (message.type === "clear") await clearMotion(message.scope);
     if (message.type === "refresh-selection") sendSelection();
     if (message.type === "resize") {
@@ -1470,10 +1928,14 @@ figma.ui.onmessage = async (message: UiToPluginMessage) => {
       figma.ui.resize(pluginWidth, height);
     }
   } catch (error) {
+    logDiagnostic("operation.failed", {
+      error: error instanceof Error ? error.message : String(error),
+    });
     post({
       type: "result",
       kind: "error",
       message: error instanceof Error ? error.message : String(error),
+      diagnostics: buildDiagnosticReport(error),
     });
   } finally {
     if (startsOperation) operationInProgress = false;

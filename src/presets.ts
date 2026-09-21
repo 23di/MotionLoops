@@ -1,6 +1,8 @@
-import type { MotionSettings, PresetId } from "./types";
+import type { MotionSettings, LegacyPresetId as PresetId } from "./types";
+import type { EditorSchema } from "./editor-schema";
 
 export type PresetTuning = {
+  editor?: EditorSchema;
   motion?: Partial<MotionSettings["motion"]>;
   geometry: Partial<MotionSettings["geometry"]>;
   appearance: Partial<MotionSettings["appearance"]>;
@@ -35,6 +37,16 @@ const parametric = (
 });
 
 export const builtInPresetTunings: Record<PresetId, PresetTuning> = {
+  crosscurrent: {
+    motion: { duration: 8 },
+    geometry: parametric({ shape: "crosscurrent", radiusX: 46, radiusY: 38, depth: 30, tilt: 0, rotation: 0 }),
+    appearance: { nearScale: 1, farScale: 0.86, farOpacity: 1 },
+  },
+  "tile-wave": {
+    motion: { duration: 7 },
+    geometry: parametric({ shape: "tile-wave", radiusX: 42, radiusY: 36, depth: 20, tilt: 0, rotation: 0 }),
+    appearance: { nearScale: 1, farScale: 0.78, farOpacity: 1 },
+  },
   circle: {
     geometry: { ...parametric({ shape: "ellipse", depthAmplitude: 0.2 }), depth: 22.5, tilt: 0, rotation: 0 },
     appearance: { nearScale: 1.08, farScale: 0.82, farOpacity: 0.55 },
@@ -47,7 +59,7 @@ export const builtInPresetTunings: Record<PresetId, PresetTuning> = {
       tilt: 0,
       rotation: 0,
     },
-    appearance: { nearScale: 1.16, farScale: 0.68, farOpacity: 0.35, facePath: true },
+    appearance: { cardSize: 30, nearScale: 1.16, farScale: 0.68, farOpacity: 0.35, facePath: true },
   },
   vision: {
     geometry: parametric({
@@ -88,19 +100,19 @@ export const builtInPresetTunings: Record<PresetId, PresetTuning> = {
       circleRotation: -28,
       rotation: 0,
     }),
-    appearance: { nearScale: 1.24, farScale: 0.52, farOpacity: 0.25 },
+    appearance: { cardSize: 30, nearScale: 1.24, farScale: 0.52, farOpacity: 0.25 },
   },
   "orbit-3d-helix": {
     geometry: parametric({ orient3d: true, yFrequency: 2, yAmplitude: 0.72, depth: 75, tilt: 0, turns: 1, rotation: 0 }),
-    appearance: { nearScale: 1.2, farScale: 0.48, farOpacity: 0.2 },
+    appearance: { cardSize: 30, nearScale: 1.2, farScale: 0.48, farOpacity: 0.2 },
   },
   "orbit-3d-eight": {
     geometry: parametric({ orient3d: true, xWave: "sin", yFrequency: 2, yAmplitude: 0.62, depthWave: "cos", depth: 70, tilt: 0, rotation: 0 }),
-    appearance: { nearScale: 1.2, farScale: 0.5, farOpacity: 0.22 },
+    appearance: { cardSize: 30, nearScale: 1.2, farScale: 0.5, farOpacity: 0.22 },
   },
   "orbit-3d-sphere": {
     geometry: { ...parametric({ shape: "sphere", orient3d: true }), depth: 75, tilt: 0, rotation: 0 },
-    appearance: { nearScale: 1.2, farScale: 0.46, farOpacity: 0.18 },
+    appearance: { cardSize: 30, nearScale: 1.2, farScale: 0.46, farOpacity: 0.18 },
   },
   "cover-flow": {
     geometry: { ...parametric({ shape: "deck" }), depth: 75, tilt: 0, rotation: 0 },
@@ -127,14 +139,20 @@ export const builtInPresetTunings: Record<PresetId, PresetTuning> = {
     appearance: { nearScale: 1.22, farScale: 0.5, farOpacity: 0.22 },
   },
   racetrack: {
+    motion: { duration: 5, stagger: 0, direction: "clockwise", fullCycle: { type: "easing", duration: 1, ease: [0, 0, 1, 1] } },
     geometry: {
-      ...parametric({ shape: "custom-path" }),
-      customPath: "[[0.22,0.14],[0.78,0.14],[0.86,0.16],[0.93,0.22],[0.97,0.33],[0.98,0.5],[0.97,0.67],[0.93,0.78],[0.86,0.84],[0.78,0.86],[0.22,0.86],[0.14,0.84],[0.07,0.78],[0.03,0.67],[0.02,0.5],[0.03,0.33],[0.07,0.22],[0.14,0.16],[0.22,0.14]]",
-      depth: 52.5,
-      tilt: 0,
+      ...parametric({ shape: "racetrack", radiusX: 60, radiusY: 90, orient3d: true, yAmplitude: 0.22 }),
+      customPath: "[[0,0.5],[1,0.5]]",
+      depth: 60,
+      tilt: 6,
+      turns: 1,
       rotation: 0,
+      shapeAmount: 1,
+      itemSpread: 1,
+      depthFalloff: 1,
     },
-    appearance: { nearScale: 1.16, farScale: 0.66, farOpacity: 0.32, facePath: true },
+    appearance: { cardSize: 30, nearScale: 1.6, farScale: 0.6, farOpacity: 0.28, fadeStart: 0, fadeEnd: 100, opacityCurve: "linear", farBlur: 0, frontShadow: 0, facePath: false },
+    other: { centerBeforeApply: true, serviceLayers: "4", scope: "selection" },
   },
   fan: {
     geometry: { ...parametric({ shape: "fan" }), depth: 45, tilt: 0, rotation: 0 },
@@ -146,7 +164,7 @@ export const builtInPresetTunings: Record<PresetId, PresetTuning> = {
   },
   vortex: {
     geometry: { ...parametric({ shape: "vortex" }), depth: 80, tilt: 0, turns: 1, rotation: 0 },
-    appearance: { nearScale: 1.22, farScale: 0.44, farOpacity: 0.16 },
+    appearance: { cardSize: 30, nearScale: 1.22, farScale: 0.44, farOpacity: 0.16 },
   },
   "focus-swap": {
     geometry: { ...parametric({ shape: "focus-deck" }), depth: 75, tilt: 0, rotation: 0 },

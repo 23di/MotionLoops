@@ -1,5 +1,5 @@
 {
-  "name": "Orbit Animator",
+  "name": "Motion Loops",
   "id": "1678895127426205163",
   "api": "1.0.0",
   "main": "dist/code.js",
@@ -8,7 +8,7 @@
   "relaunchButtons": [
     {
       "command": "edit-orbit",
-      "name": "Edit Orbit animation",
+      "name": "Edit Motion Loops animation",
       "multipleSelection": true
     }
   ],

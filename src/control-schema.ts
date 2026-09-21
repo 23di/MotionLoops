@@ -1,0 +1,165 @@
+import type { DialConfig } from "dialkit";
+import { presetOptions } from "./types";
+import { referenceControls } from "./reference-controls";
+import { referencePresets } from "./reference-catalog";
+import { recipePresentation } from "./preset-presentation";
+export const controls = {
+  renderer: {type:"select",options:["auto","legacy",...Object.keys(recipePresentation)],default:"auto"},
+  reference: referenceControls,
+  preset: {
+    type: "select",
+    options: [...presetOptions.map((preset) => ({ value: preset.value, label: preset.label })),...referencePresets.map(preset=>({value:preset.id,label:preset.label}))],
+    default: "orbit-3d-ring",
+  },
+  motion: {
+    _collapsed: true,
+    duration: [5, 0.4, 12, 0.1],
+    stagger: [0, 0, 1.5, 0.01],
+    direction: {
+      type: "select",
+      options: [
+        { value: "clockwise", label: "Clockwise" },
+        { value: "counterclockwise", label: "Counterclockwise" },
+      ],
+      default: "clockwise",
+    },
+    fullCycle: {
+      type: "easing",
+      duration: 1,
+      ease: [0, 0, 1, 1],
+    },
+  },
+  geometry: {
+    _collapsed: true,
+    units: {
+      type: "select",
+      options: [{ value: "percent", label: "Percent" }],
+      default: "percent",
+    },
+    shape: {
+      type: "select",
+      options: [
+        { value: "ellipse", label: "Ellipse" },
+        { value: "crosscurrent", label: "Crosscurrent" },
+        { value: "tile-wave", label: "Tile Wave" },
+        { value: "custom-path", label: "Custom path" },
+        { value: "parametric", label: "Parametric" },
+        { value: "sphere", label: "Sphere" },
+        { value: "deck", label: "Deck" },
+        { value: "shuffle", label: "Shuffle" },
+        { value: "falling-stack", label: "Falling stack" },
+        { value: "tunnel", label: "Tunnel" },
+        { value: "cylinder", label: "Cylinder" },
+        { value: "racetrack", label: "Racetrack" },
+        { value: "focus-deck", label: "Focus deck" },
+        { value: "fan", label: "Fan" },
+        { value: "pendulum", label: "Pendulum" },
+        { value: "vortex", label: "Vortex" },
+      ],
+      default: "parametric",
+    },
+    customPath: {
+      type: "text",
+      default: "[[0.04,0.68],[0.22,0.36],[0.48,0.48],[0.72,0.68],[0.96,0.34]]",
+    },
+    dynamicScale: true,
+    radiusX: [50, 0, 100, 1],
+    radiusY: [40, 0, 100, 1],
+    circleRotation: [0, -180, 180, 1],
+    depth: [65, 0, 200, 1],
+    tilt: [28, -90, 90, 1],
+    turns: [1, 0.25, 4, 0.25],
+    rotation: [0, -180, 180, 1],
+    orient3d: true,
+    shapeAmount: [1, 0, 2, 0.05],
+    itemSpread: [1, 0, 3, 0.05],
+    depthFalloff: [1, 0.1, 4, 0.05],
+    advanced: {
+      _collapsed: true,
+      xWave: {
+        type: "select",
+        options: [{ value: "cos", label: "Cosine" }, { value: "sin", label: "Sine" }],
+        default: "cos",
+      },
+      yWave: {
+        type: "select",
+        options: [{ value: "sin", label: "Sine" }, { value: "cos", label: "Cosine" }],
+        default: "sin",
+      },
+      depthWave: {
+        type: "select",
+        options: [{ value: "sin", label: "Sine" }, { value: "cos", label: "Cosine" }],
+        default: "sin",
+      },
+      xFrequency: [1, 0, 8, 0.25],
+      yFrequency: [1, 0, 8, 0.25],
+      depthFrequency: [1, 0, 8, 0.25],
+      xAmplitude: [1, -2, 2, 0.05],
+      yAmplitude: [1, -2, 2, 0.05],
+      depthAmplitude: [1, -2, 2, 0.05],
+      xPhase: [0, -180, 180, 1],
+      yPhase: [0, -180, 180, 1],
+      depthPhase: [0, -180, 180, 1],
+      yOffset: [0, -2, 2, 0.05],
+    },
+  },
+  appearance: {
+    cardSize: [58, 0, 100, 1],
+    _collapsed: true,
+    nearScale: [1.25, 0.1, 3, 0.05],
+    farScale: [0.55, 0.05, 2, 0.05],
+    farOpacity: [0.28, 0, 1, 0.01],
+    fadeStart: [0, 0, 100, 1],
+    fadeEnd: [100, 0, 100, 1],
+    opacityCurve: {
+      type: "select",
+      options: [
+        { value: "linear", label: "Linear" },
+        { value: "early", label: "Early fade" },
+        { value: "late", label: "Late fade" },
+        { value: "soft", label: "Soft" },
+        { value: "sharp", label: "Sharp" },
+      ],
+      default: "linear",
+    },
+    farBlur: [0, 0, 40, 1],
+    frontShadow: [0, 0, 40, 1],
+    facePath: false,
+  },
+  other: {
+    _collapsed: true,
+    centerBeforeApply: true,
+    serviceLayers: {
+      type: "select",
+      options: [
+        { value: "0", label: "Off" },
+        { value: "2", label: "2" },
+        { value: "3", label: "3" },
+        { value: "4", label: "4" },
+        { value: "5", label: "5+" },
+      ],
+      default: "2",
+    },
+    scope: {
+      type: "select",
+      options: [
+        { value: "selection", label: "Selected layers" },
+        { value: "children", label: "Frame children" },
+        { value: "deep", label: "Deep descendants" },
+      ],
+      default: "selection",
+    },
+    copyJson: {
+      type: "action",
+      label: "Copy JSON",
+    },
+    pasteJson: {
+      type: "action",
+      label: "Paste",
+    },
+    resetSettings: {
+      type: "action",
+      label: "Reset settings",
+    },
+  },
+} satisfies DialConfig;

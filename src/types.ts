@@ -1,4 +1,6 @@
 export const presetOptions = [
+  { value: "crosscurrent", label: "Crosscurrent" },
+  { value: "tile-wave", label: "Tile Wave" },
   { value: "circle", label: "Circle" },
   { value: "path-wave", label: "Path wave" },
   { value: "vision", label: "Vision focus" },
@@ -22,13 +24,16 @@ export const presetOptions = [
   { value: "depth-blur", label: "Depth Blur" },
 ] as const;
 
-export type PresetId = (typeof presetOptions)[number]["value"];
+export type LegacyPresetId = (typeof presetOptions)[number]["value"];
+export type PresetId = LegacyPresetId | import("./reference-catalog").ReferencePresetId;
 export type TargetScope = "selection" | "children" | "deep";
 export type Direction = "clockwise" | "counterclockwise";
 export type OpacityCurve = "linear" | "early" | "late" | "soft" | "sharp";
 export type WaveFunction = "sin" | "cos";
 export type GeometryUnits = "percent" | "pixels";
 export type GeometryShape =
+  | "crosscurrent"
+  | "tile-wave"
   | "ellipse"
   | "custom-path"
   | "parametric"
@@ -61,7 +66,10 @@ export type DialTransition =
 
 export type ServiceLayerCount = "0" | "2" | "3" | "4" | "5";
 
+/** Evaluator/legacy-file adapter shape. UI and persistence use MotionDocument v2. */
 export interface MotionSettings {
+  renderer?: string;
+  reference?: Record<string, number | string | boolean>;
   preset: PresetId;
   motion: {
     duration: number;
@@ -101,6 +109,7 @@ export interface MotionSettings {
     depthFalloff: number;
   };
   appearance: {
+    cardSize?: number;
     nearScale: number;
     farScale: number;
     farOpacity: number;
@@ -142,11 +151,11 @@ export interface TargetPreview {
 }
 
 export type UiToPluginMessage =
-  | { type: "apply"; settings: MotionSettings }
+  | { type: "apply"; settings: MotionSettings | import("./motion-system").MotionDocument }
   | { type: "clear"; scope: TargetScope }
   | { type: "refresh-selection" }
   | { type: "resize"; height: number };
 
 export type PluginToUiMessage =
   | { type: "selection"; selection: SelectionSummary }
-  | { type: "result"; kind: "success" | "error"; message: string };
+  | { type: "result"; kind: "success" | "error"; message: string; diagnostics?: string };
