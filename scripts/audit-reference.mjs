@@ -1,6 +1,7 @@
 // Read-only numerical comparison against the source Canvas painter. The source
-// is not executed as an app: only three isolated numeric branches run against
-// a recording context, without document/window/network access.
+// is not executed as an app: only isolated numeric branches run against
+// a recording context, without document/window/network access. Row has its own
+// camera scaling, repeat, and visible-card behavior, covered by reference tests.
 import ts from "typescript";
 import { build } from "esbuild";
 import assert from "node:assert/strict";
@@ -29,7 +30,8 @@ function record(){
   return {cards,save(){stack.push({...state})},restore(){state=stack.pop()},translate(x,y){state.x+=x;state.y+=y},rotate(r){state.rotation+=r},beginPath(){},roundRect(x,y,w,h,r){state.radius=r},clip(){},fill(){},fillRect(){},drawImage(image,...args){const [x,y,w,h]=args.slice(-4),cx=x+w/2,cy=y+h/2,c=Math.cos(state.rotation),s=Math.sin(state.rotation);cards.push({source:image.id,x:state.x+cx*c-cy*s,y:state.y+cx*s+cy*c,width:w,height:h,rotation:state.rotation*180/Math.PI,radius:state.radius})}};
 }
 let checks=0;
-for(const preset of referencePresets.filter(p=>p.mode!=="motif"))for(const count of [2,5,9])for(const [width,height] of [[720,400],[400,720],[3987,2813]]){
+const oraclePresets=referencePresets.filter(p=>p.mode!=="motif"&&p.mode!=="rfCarousel");
+for(const preset of oraclePresets)for(const count of [2,5,9])for(const [width,height] of [[720,400],[400,720],[3987,2813]]){
   const settings=catalog.freshPreset(preset.id),images=Array.from({length:count},(_,id)=>({id,width:120+id*35,height:160+id*7}));
   const params={...settings.reference,count,cornerRadius:0};
   if(preset.mode==="rfCarousel")for(const key of ["planeSize","gap"])params[key]=Math.round(params[key]*10.8*1e10)/1e10;
@@ -43,4 +45,4 @@ for(const preset of referencePresets.filter(p=>p.mode!=="motif"))for(const count
     checks++;
   }
 }
-console.log(`Reference oracle: ${referencePresets.filter(p=>p.mode!=="motif").length} presets, ${checks} scene comparisons passed.`);
+console.log(`Reference oracle: ${oraclePresets.length} presets, ${checks} scene comparisons passed.`);

@@ -1179,6 +1179,11 @@ async function applyReferenceMotion(settings: MotionSettings): Promise<void> {
 
 async function applyMotion(settings: MotionSettings): Promise<void> {
   const nativeDefinition = referenceDefinition(settings);
+  if (figma.currentPage.selection.some((node) => node.type === "SECTION")) {
+    throw new Error(nativeDefinition
+      ? "Sections can't be animated. Select the cards inside a frame."
+      : "Sections can't be animated. Select a frame or layers inside it.");
+  }
   logDiagnostic("apply.route", {
     preset: settings.preset,
     renderer: nativeDefinition ? "reference" : "trajectory",

@@ -303,6 +303,19 @@ function assertSparseTrackAccuracy(activeSettings: MotionSettings): void {
 }
 
 assert(onMessage, "Plugin message handler must be registered");
+const selectedBeforeSectionCheck = globalThis.figma.currentPage.selection;
+globalThis.figma.currentPage.selection = [{ id: "section-1", name: "Test section", type: "SECTION" }];
+for (const [candidate, expected] of [
+  [freshPreset("reference-carousel-01"), "Sections can't be animated. Select the cards inside a frame."],
+  [settings, "Sections can't be animated. Select a frame or layers inside it."],
+] as const) {
+  const before = postedMessages.length;
+  await onMessage({ type: "apply", settings: candidate });
+  assert(postedMessages.slice(before).some((message) =>
+    message.type === "result" && message.kind === "error" && message.message === expected
+  ), "Selecting a section explains which layers to animate");
+}
+globalThis.figma.currentPage.selection = selectedBeforeSectionCheck;
 const findAllCallsBeforeApply = findAllCalls;
 const firstApply = onMessage({ type: "apply", settings });
 const duplicateApply = onMessage({ type: "apply", settings });
