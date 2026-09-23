@@ -33,6 +33,10 @@ for(const id of ids){
   const settings=freshPreset(id);
   const small=fitSettingsToFrame(settings,720,400,6,8,5);
   const large=fitSettingsToFrame(settings,720,400,6000,8000,5);
+  if(settings.appearance.cardSize===0){
+    assert.equal(small.appearance.nearScale,settings.appearance.nearScale,id+": zero card size preserves source-relative scale");
+    continue;
+  }
   assert(Math.abs(small.appearance.nearScale*8-large.appearance.nearScale*8000)<1e-8, id+": card size depends on frame, not source dimensions");
   const a=generateNodeKeyframes(small,0,5),b=generateNodeKeyframes(large,0,5);
   for(let i=0;i<a.length;i++){
@@ -70,7 +74,7 @@ assert(motionFingerprint({...baseline, motion: {...baseline.motion, duration: 9}
 assert.equal(motionFingerprint({...baseline, other: {...baseline.other, scope: "children"}}), motionFingerprint(baseline), "Changing selection scope is not a new preset");
 assert.equal(new Set(ids).size, ids.length, "Variants must not repeat between families");
 assert(!ids.includes("pendulum"), "Swing must be retired from the active catalog");
-assert.equal(families.length, 9, "Bloom replaces Ripple in the active catalog");
+assert.equal(families.length, 10, "Orbit 04 is added to the active catalog");
 assert(!ids.includes("crosscurrent"), "Counterflow must be retired from the active gallery");
 assert(!ids.includes("tile-wave"), "Ripple must be retired from the active gallery");
 assert(ids.includes("bloom"), "Bloom must appear in the active gallery");

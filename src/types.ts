@@ -9,6 +9,7 @@ export const presetOptions = [
   { value: "orbit-3d-ring", label: "3D · Turntable" },
   { value: "orbit-3d-vertical", label: "3D · Vertical halo" },
   { value: "orbit-3d-tilted", label: "3D · Saturn tilt" },
+  { value: "orbit-3d-compact", label: "Orbit 04" },
   { value: "orbit-3d-helix", label: "3D · Double helix" },
   { value: "orbit-3d-eight", label: "3D · Figure eight" },
   { value: "orbit-3d-sphere", label: "3D · Sphere" },

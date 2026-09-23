@@ -44,8 +44,13 @@ for(const id of presets){
         config?.type==="easing"?[{type:"easing",duration:1,ease:[.42,0,.58,1]}]:
         config?.type==="text"?["[[0,0],[0.5,1],[1,0]]"]:[];
       assert(alternatives.length,`${id}: missing audit for ${binding.id}`);
-      assert(alternatives.some((next:any)=>trace({...document,parameters:{...document.parameters,[binding.id]:next}})!==baseline),
-        `${id}: visible control ${binding.id} has no animation effect`);
+      const changesOutput=alternatives.some((next:any)=>trace({...document,parameters:{...document.parameters,[binding.id]:next}})!==baseline);
+      // A compact orbit can already fit at native card size. Exercise Fit
+      // with an oversized path so its constraint is actually active.
+      const constrainedFit=binding.id==="fit"&&trace({...document,parameters:{...document.parameters,radiusX:100,radiusY:100,fit:true}})!==
+        trace({...document,parameters:{...document.parameters,radiusX:100,radiusY:100,fit:false}});
+      assert(changesOutput||constrainedFit,
+        `${id}/${document.parameters.shape}: visible control ${binding.id} has no animation effect`);
       checks++;
     }
   }

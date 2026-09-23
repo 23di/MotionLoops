@@ -1,6 +1,6 @@
 import type { MotionSettings } from "./types";
 import { pulseDefaults, bloomPulse, migrateBloomSettings } from "./motion-modifiers";
-import { referenceDefinition } from "./reference-catalog";
+import { referenceDefinition, referencePreset } from "./reference-catalog";
 import { referenceDefaults } from "./reference-controls";
 
 export const animationOptions = [
@@ -27,12 +27,24 @@ export function applyAnimation(settings: MotionSettings, id: string): MotionSett
   if(id==="queue"&&referenceDefinition(settings)?.mode==="rfCarousel") return settings;
   if(id==="queue") return {...settings,renderer:"rfCarousel",
     reference:{...referenceDefaults("reference-carousel-05"),pathShape:settings.geometry.shape},
-    motion:{...settings.motion,...pulseDefaults}};
+    motion:{...settings.motion,...pulseDefaults,duration:referencePreset("reference-carousel-05")!.duration}};
   const queued=referenceDefinition(settings)?.mode==="rfCarousel";
+  const line=queued&&(settings.reference?.pathShape??"line")==="line";
+  if(line){
+    const travel=String(settings.reference?.direction??"right");
+    const vertical=travel==="up"||travel==="down";
+    return {...settings,renderer:"legacy",
+      geometry:{...settings.geometry,shape:"custom-path",
+        customPath:vertical?"[[0.5,1],[0.5,0]]":"[[0,0.5],[1,0.5]]",
+        orient3d:false,tilt:0,circleRotation:0,rotation:0,
+        depthAmplitude:0,turns:1},
+      appearance:{...settings.appearance,nearScale:id==="depth-wave"?1.2:1,
+        farScale:id==="depth-wave"?.8:1,farOpacity:1,
+        farBlur:0,frontShadow:0,facePath:false},
+      motion:{...settings.motion,...animation.parameters,stagger:0,
+        direction:travel==="left"||travel==="down"?"counterclockwise":"clockwise",
+        fullCycle:{type:"easing",duration:1,ease:[0,0,1,1]}}};
+  }
   return {...settings,renderer:queued?"legacy":settings.renderer,
-    geometry:queued&&(settings.reference?.pathShape??"line")==="line"
-      ? {...settings.geometry,shape:"custom-path",customPath:"[[0,0.5],[1,0.5]]"}
-      :settings.geometry,
     motion:{...settings.motion,...animation.parameters}};
 }
-

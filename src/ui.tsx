@@ -33,7 +33,7 @@ const panelId = "orbit-motion-controls-v8";
 const legacyPanelId = "orbit-motion-controls-v7";
 
 const builtInPresetSchemaKey = "orbit-built-in-preset-schema";
-const builtInPresetSchemaVersion = "22";
+const builtInPresetSchemaVersion = "24";
 let builtInPresetSchemaMigratedInSession = false;
 
 function migrateLegacyDialkitStorage(): void {

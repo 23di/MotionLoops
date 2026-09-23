@@ -112,11 +112,11 @@ function trajectoryDistance(left: MotionSettings, right: MotionSettings): number
   return Math.sqrt(squaredDistance / samples);
 }
 
-assert(presetOptions.length === 23, "Bloom replaces Ripple in active built-in presets");
+assert(presetOptions.length === 24, "Orbit 04 joins the active built-in presets");
 assert(!presetOptions.some((preset) => String(preset.value) === "tunnel"), "Tunnel preset must not remain in the catalog");
 assert(
-  presetOptions.filter((preset) => preset.value.startsWith("orbit-3d")).length === 6,
-  "Expected six 3D orbit presets",
+  presetOptions.filter((preset) => preset.value.startsWith("orbit-3d")).length === 7,
+  "Expected seven 3D orbit presets",
 );
 assert(
   !presetOptions.some((preset) => String(preset.value) === "album-wall"),

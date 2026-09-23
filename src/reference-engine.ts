@@ -82,14 +82,15 @@ export function referenceScene(settings: MotionSettings, sizes: readonly SourceS
     const edge=scales&&focus!=="center",focusSign=focus==="start"||focus==="left"?-1:1,span=Math.max(pitch,(visibleLimit-1)/2*pitch);
     const bias=edge?Math.max(-.9,Math.min(.9,plane*(centerScale-1)*focusSign/Math.max(1,pitch))):0;
     const bend=(x:number)=>Math.abs(x)<=span?x*x/(2*span):Math.abs(x)-span/2;
-    const prepared:Array<{source:number;x:number;y:number;width:number;distance:number;rotation:number;shade:number}>=[];
+    const curved=str("pathShape","line")!=="line";
+    const prepared:Array<{pathPosition:number;source:number;x:number;y:number;width:number;distance:number;rotation:number;shade:number}>=[];
     for(let item=0;item<count;item++){
       const source=sign>0?wrap(count-item,count):item,aspect=sizes[source].width/sizes[source].height;
       const cardWidth=vertical?plane*aspect:plane,cardHeight=vertical?plane:plane/aspect;
       const bound=(vertical?height/2+cardHeight:width/2+cardWidth)+Math.abs(vertical?offsetY:offsetX);
       const repeat=pitch*count>0?Math.ceil(bound/(pitch*count))+1:1;
       for(let copy=-repeat;copy<=repeat;copy++){
-        const absolute=item+copy*count,delayIndex=sign<0?absolute:count-1-absolute;
+        const absolute=item+copy*count,timingIndex=curved?item:absolute,delayIndex=sign<0?timingIndex:count-1-timingIndex;
         let progress=0;
         if(period>0){const shifted=seconds-delayIndex*stagger,whole=Math.floor(shifted/period),local=shifted-whole*period;progress=whole+ease(clamp(duration>0?local/duration:1));}
         const position=(absolute+sign*progress-start)*pitch;
@@ -97,7 +98,7 @@ export function referenceScene(settings: MotionSettings, sizes: readonly SourceS
         const location=bias!==0?position+bias*bend(position):position,normalized=Math.max(-1,Math.min(1,location/Math.max(1,extent/2)));
         const angle=tiltStyle==="off"?0:1.0471975512*amount*(tiltStyle==="uniform"?Math.abs(normalized):tiltStyle==="alternate"?normalized*(source%2===0?1:-1):normalized)*180/Math.PI;
         if(!solo&&(location>bound||location<-bound))continue;
-        prepared.push({source,x:width/2+(vertical?0:location)+offsetX,y:height/2+(vertical?location:0)+offsetY,width:cardWidth*scale,distance:Math.abs(location),rotation:angle,shade:solo?0:Math.min(ease(clamp(Math.abs(location)/(extent/2))),1)*depthFade});
+        prepared.push({pathPosition:absolute+sign*progress-start,source,x:width/2+(vertical?0:location)+offsetX,y:height/2+(vertical?location:0)+offsetY,width:cardWidth*scale,distance:Math.abs(location),rotation:angle,shade:solo?0:Math.min(ease(clamp(Math.abs(location)/(extent/2))),1)*depthFade});
       }
     }
     if(scales&&focus==="center"&&!solo&&prepared.length){
@@ -120,6 +121,14 @@ export function referenceScene(settings: MotionSettings, sizes: readonly SourceS
         card.shade=ease(clamp(card.distance/(extent/2)))*depthFade;
       }
     }
+    if(curved){
+      // A closed path has one slot per source. Row's offscreen copies must
+      // not become duplicate cards when the line is wrapped into a loop.
+      const nearest=new Map<number,typeof prepared[number]>();
+      for(const card of prepared)if(!nearest.has(card.source)||card.distance<nearest.get(card.source)!.distance)
+        nearest.set(card.source,card);
+      prepared.splice(0,prepared.length,...nearest.values());
+    }
     const byDistance=(a:typeof prepared[number],b:typeof prepared[number])=>Math.abs(a.distance-b.distance)>1e-7?a.distance-b.distance:(vertical?a.y-b.y:a.x-b.x);
     if(solo)prepared.sort(byDistance).splice(1);
     else {
@@ -129,22 +138,62 @@ export function referenceScene(settings: MotionSettings, sizes: readonly SourceS
       }
       prepared.sort((a,b)=>byDistance(b,a));
     }
+    const pathSettings={...settings,motion:{...settings.motion,radiusPulse:0,scalePulse:0,opacityPulse:0,depthPulse:0},
+      geometry:{...settings.geometry,shape:str("pathShape","ellipse") as MotionSettings["geometry"]["shape"]}};
+    const project=(angle:number,source:number)=>{
+      const point=pointForGeometry(angle,pathSettings,source,count);
+      const rawX=point.x*width/100,rawY=point.y*height/100;
+      if(pathSettings.geometry.orient3d)return {x:rawX,y:rawY};
+      const rotation=(settings.geometry.circleRotation??0)*Math.PI/180;
+      return {x:rawX*Math.cos(rotation)-rawY*Math.sin(rotation),
+        y:rawX*Math.sin(rotation)+rawY*Math.cos(rotation)};
+    };
+    const pathSlots=Math.min(count,visibleLimit);
+    const focusAngle=scales&&focus==="center"?Math.PI/2:0;
+    const projectSlot=(angle:number,source:number)=>{
+      const point=project(angle+focusAngle,source);
+      // Globe and Coil use each source's index in their path geometry.
+      // Anchor that source at the focus so its largest state reaches center.
+      const anchor=scales&&focus==="center"?project(focusAngle,source):{x:0,y:0};
+      return {x:point.x-anchor.x,y:point.y-anchor.y};
+    };
+    const projected=curved?prepared.map(card=>projectSlot(card.pathPosition/pathSlots*Math.PI*2,card.source)):[];
+    let pathFit=1,cardFit=1;
+    if(curved&&settings.geometry.dynamicScale){
+      // Fit the complete path once against the largest possible focused card.
+      // This must stay constant while the Row advances.
+      let maxX=0,maxY=0;
+      for(let source=0;source<count;source++)for(let step=0;step<64;step++){
+        const point=projectSlot(step/64*Math.PI*2,source);
+        maxX=Math.max(maxX,Math.abs(point.x));maxY=Math.max(maxY,Math.abs(point.y));
+      }
+      let widest=0,tallest=0;
+      for(let source=0;source<count;source++){
+        const aspect=sizes[source].width/sizes[source].height;
+        const widthOf=(vertical?plane*aspect:plane)*(scales?centerScale:1)+overlap;
+        widest=Math.max(widest,widthOf);tallest=Math.max(tallest,widthOf/aspect);
+      }
+      // A tall source can exceed the frame even with a zero-radius path.
+      // Fit the cards first, then reserve their actual footprint around it.
+      cardFit=Math.min(1,
+        Math.max(0,width-2*Math.abs(offsetX)-16)*.65/Math.max(widest,1),
+        Math.max(0,height-2*Math.abs(offsetY)-16)*.65/Math.max(tallest,1));
+      const fitPath=()=>{
+        const roomX=width/2-widest*cardFit/2-Math.abs(offsetX)-8;
+        const roomY=height/2-tallest*cardFit/2-Math.abs(offsetY)-8;
+        return Math.min(1,maxX>1e-6?Math.max(0,roomX)/maxX:1,
+          maxY>1e-6?Math.max(0,roomY)/maxY:1);
+      };
+      pathFit=fitPath();
+
+    }
     for(const [layer,card] of prepared.entries()){
       if(card.width<.5*height/1080)continue;
-      let x=card.x,y=card.y;
-      if(str("pathShape","line")!=="line"){
-        // Change only the route: Row still owns progress, pauses, stagger,
-        // packing, focus scaling and the visible population.
-        const location=vertical?card.y-height/2-offsetY:card.x-width/2-offsetX;
-        const angle=location/Math.max(1,extent)*Math.PI*2;
-        const pathSettings={...settings,motion:{...settings.motion,radiusPulse:0,scalePulse:0,opacityPulse:0,depthPulse:0},
-          geometry:{...settings.geometry,shape:str("pathShape","ellipse") as MotionSettings["geometry"]["shape"],orient3d:false,circleRotation:0}};
-        const point=pointForGeometry(angle,pathSettings,card.source,count);
-        const rotation=(settings.geometry.circleRotation??0)*Math.PI/180;
-        x=width/2+(point.x*Math.cos(rotation)-point.y*Math.sin(rotation))*width/100+offsetX;
-        y=height/2+(point.x*Math.sin(rotation)+point.y*Math.cos(rotation))*height/100+offsetY;
-      }
-      add(card.source,layer,x,y,card.width+overlap,card.width/(sizes[card.source].width/sizes[card.source].height)+overlap,solo?0:card.rotation);
+      const x=curved?width/2+offsetX+projected[layer].x*pathFit:card.x;
+      const y=curved?height/2+offsetY+projected[layer].y*pathFit:card.y;
+      add(card.source,layer,x,y,(card.width+overlap)*cardFit,
+        (card.width/(sizes[card.source].width/sizes[card.source].height)+overlap)*cardFit,
+        solo?0:card.rotation);
       if(scales&&focus==="center")cards[cards.length-1].opacity=1-card.shade;
       else cards[cards.length-1].shade=card.shade>.01?card.shade:0;
     }

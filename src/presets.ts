@@ -3,6 +3,7 @@ import type { EditorSchema } from "./editor-schema";
 import { orbitOneGeometry, orbitOneAppearance } from "./motion-modifiers";
 
 export type PresetTuning = {
+  preservePrecision?: boolean;
   editor?: EditorSchema;
   motion?: Partial<MotionSettings["motion"]>;
   geometry: Partial<MotionSettings["geometry"]>;
@@ -101,6 +102,15 @@ export const builtInPresetTunings: Record<PresetId, PresetTuning> = {
   "orbit-3d-tilted": {
     geometry: parametric(orbitOneGeometry),
     appearance: orbitOneAppearance,
+  },
+  "orbit-3d-compact": {
+    preservePrecision: true,
+    motion: { duration: 6, stagger: 0, fullCycle: { type: "easing", duration: 1, ease: [.17, .96, .68, .62] } },
+    geometry: parametric({ ...orbitOneGeometry, radiusX: 60, radiusY: 12.5,
+      depth: 24.21875, tilt: 15, circleRotation: -15, turns: 1, pathScale: 1,
+      customPath: "[[0.04,0.68],[0.22,0.36],[0.48,0.48],[0.72,0.68],[0.96,0.34]]" }),
+    appearance: { ...orbitOneAppearance, cardSize: 0 },
+    other: { centerBeforeApply: true, serviceLayers: "2", scope: "selection" },
   },
   "orbit-3d-helix": {
     geometry: parametric({ orient3d: true, yFrequency: 2, yAmplitude: 0.72, depth: 75, tilt: 0, turns: 1, rotation: 0 }),

@@ -17,6 +17,7 @@ export const families: { name: string; description: string; variants: { id: Pres
   { name: "Orbit 01", description: "Cards follow a tilted spatial orbit", variants: [{ id: "orbit-3d-tilted", name: "Tilted" }] },
   { name: "Orbit 02", description: "Cards travel through a double-loop orbit", variants: [{ id: "orbit-3d-helix", name: "Double loop" }] },
   { name: "Orbit 03", description: "Cards cross along a spatial figure eight", variants: [{ id: "orbit-3d-eight", name: "Figure eight" }] },
+  { name: "Orbit 04", description: "A compact tilted orbit with a paced rotation", variants: [{ id: "orbit-3d-compact", name: "Compact" }] },
   { name: "Contour", description: "A continuous stream along a shaped path", variants: [
     { id: "path-wave", name: "Wave" },
   ] },
@@ -38,7 +39,9 @@ export function editorFor(settings: MotionSettings):EditorSchema {
 }
 
 export function freshPreset(id: PresetId, previous?: MotionSettings): MotionSettings {
-  return preferredSettings(presetSettings(id, previous));
+  const settings=presetSettings(id, previous);
+  return builtInPresetTunings[id as keyof typeof builtInPresetTunings]?.preservePrecision
+    ? settings : preferredSettings(settings);
 }
 
 function presetSettings(id: PresetId, previous?: MotionSettings): MotionSettings {
