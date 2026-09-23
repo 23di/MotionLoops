@@ -1,4 +1,5 @@
 import { presetOptions, type MotionSettings } from "./types";
+import { migrateBloomSettings } from "./motion-modifiers";
 import { referencePreset, referencePresets, referenceDefinition } from "./reference-catalog";
 import { recipeKey, recipePresentation } from "./preset-presentation";
 import { referenceControls, referenceDefaults, referenceEditor } from "./reference-controls";
@@ -102,6 +103,7 @@ export function parseSettingsJson(text: string, current: MotionSettings): Motion
     };
   }
 
+  candidate=migrateBloomSettings(candidate as unknown as MotionSettings) as unknown as Record<string,unknown>;
   const incoming=candidate as Record<string,unknown>;
   const incomingMotion=incoming.motion as Record<string,unknown>;
   if("fullCycle" in incomingMotion)validateTransition(incomingMotion.fullCycle as MotionSettings["motion"]["fullCycle"]);
@@ -127,7 +129,7 @@ export function parseSettingsJson(text: string, current: MotionSettings): Motion
     }
     if(settings.motion.duration<=0)throw new Error("Cycle duration must be positive.");
   }
-  oneOf(settings.preset, [...presetOptions,...referencePresets.map(p=>({value:p.id}))].map((preset) => preset.value), "settings.preset");
+  oneOf(settings.preset, [...presetOptions,...referencePresets.map(p=>({value:p.id})),{value:"tile-wave"}].map((preset) => preset.value), "settings.preset");
   oneOf(settings.motion.direction, ["clockwise", "counterclockwise"], "settings.motion.direction");
   if((settings.appearance.cardSize??0)<0)throw new Error("Card size must be non-negative.");
   oneOf(settings.geometry.shape, [

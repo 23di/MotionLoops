@@ -81,11 +81,19 @@ type DiagnosticEntry = { elapsedMs: number; step: string; details?: DiagnosticDe
 let diagnosticStartedAt = 0;
 let diagnosticOperation = "idle";
 let diagnosticEntries: DiagnosticEntry[] = [];
+let diagnosticBefore: DiagnosticDetails | null = null;
+let diagnosticAfter: DiagnosticDetails | null = null;
+let diagnosticTargetIds: string[] = [];
+let diagnosticSettings: MotionSettings | null = null;
 
 function beginDiagnostics(operation: string, details: DiagnosticDetails = {}): void {
   diagnosticStartedAt = Date.now();
   diagnosticOperation = operation;
   diagnosticEntries = [];
+  diagnosticBefore = null;
+  diagnosticAfter = null;
+  diagnosticTargetIds = [];
+  diagnosticSettings = null;
   logDiagnostic("operation.started", details);
 }
 
@@ -160,6 +168,8 @@ function buildDiagnosticReport(error: unknown): string {
       operation: diagnosticOperation,
       error: error == null ? null : error instanceof Error ? error.message : String(error),
       events: diagnosticEntries,
+      before: diagnosticBefore,
+      after: diagnosticAfter,
       state: { selected, marked, markedCount: markedTotal, truncated: markedTotal > marked.length },
     }, null, 2),
   ].join("\n");
@@ -174,7 +184,7 @@ function selectionSummary(): SelectionSummary {
   ]).find((node) => readOrbitMarker(node)?.role === "front");
   const animatedMarker = animatedTarget ? readOrbitMarker(animatedTarget) : null;
   const preset = animatedMarker?.preset;
-  const appliedPreset = preset && (presetOptions.some((option) => option.value === preset)||referencePreset(preset))
+  const appliedPreset = preset && (presetOptions.some((option) => option.value === preset)||preset === "tile-wave"||referencePreset(preset))
     ? preset as PresetId
     : null;
   const targetPreview = (scope: TargetScope) => {
@@ -604,7 +614,22 @@ function sampledFloatTrack(
   return sparseFloatTrack(baseValue, frames, value, Math.max(1e-7, range * 1e-5), steppedState);
 }
 
+function autoLayoutCenterOffset(node: MotionNode): { x: number; y: number } | null {
+  const frame = node.getTopLevelFrame();
+  const parent = tryGetParent(node);
+  if (!frame || parent?.id !== frame.id ||
+    !("layoutMode" in parent) || parent.layoutMode === "NONE") return null;
+  // x/y are the unanimated slot assigned by the parent. The bounding box can
+  // reflect the current Motion playhead and must not become a new track origin.
+  return {
+    x: frame.width / 2 - (node.x + node.width / 2),
+    y: frame.height / 2 - (node.y + node.height / 2),
+  };
+}
+
 function frameCenterOffset(node: MotionNode): { x: number; y: number } {
+  const layoutOffset = autoLayoutCenterOffset(node);
+  if (layoutOffset) return layoutOffset;
   const nodeBounds = node.absoluteBoundingBox;
   const frameBounds = node.getTopLevelFrame()?.absoluteBoundingBox;
   if (!nodeBounds || !frameBounds) return { x: 0, y: 0 };
@@ -616,6 +641,8 @@ function frameCenterOffset(node: MotionNode): { x: number; y: number } {
 }
 
 function sourceCenterOffset(node: MotionNode): { x: number; y: number } {
+  const layoutOffset = autoLayoutCenterOffset(node);
+  if (layoutOffset) return layoutOffset;
   const marker = readOrbitMarker(node);
   if (
     marker?.centerOffset && Number.isFinite(marker.centerOffset.x) &&
@@ -638,6 +665,83 @@ function sourceCenterOffset(node: MotionNode): { x: number; y: number } {
     }
   }
   return frameCenterOffset(node);
+}
+
+async function captureDiagnosticScene(): Promise<DiagnosticDetails> {
+  const sources: DiagnosticDetails[] = [];
+  for (const id of diagnosticTargetIds) {
+    const resolved = await figma.getNodeByIdAsync(id);
+    if (!resolved || resolved.type === "DOCUMENT" || resolved.type === "PAGE" || !isMotionNode(resolved)) {
+      sources.push({ id, missing: true });
+      continue;
+    }
+    const node = resolved;
+    const parent = tryGetParent(node);
+    const frame = node.getTopLevelFrame();
+    const marker = readOrbitMarker(node);
+    const xTrack = node.manualKeyframeTracks.TRANSLATION_X;
+    const yTrack = node.manualKeyframeTracks.TRANSLATION_Y;
+    const firstX = xTrack?.keyframes[0]?.value;
+    const firstY = yTrack?.keyframes[0]?.value;
+    const firstTranslation = firstX?.type === "FLOAT" && firstY?.type === "FLOAT"
+      ? { x: firstX.value, y: firstY.value }
+      : null;
+    const services: DiagnosticDetails[] = [];
+    for (const serviceId of (marker?.serviceIds ?? []).slice(0, 6)) {
+      const service = await figma.getNodeByIdAsync(serviceId);
+      if (!service || service.type === "DOCUMENT" || service.type === "PAGE") {
+        services.push({ id: serviceId, missing: true });
+        continue;
+      }
+      services.push({
+        id: service.id,
+        x: service.x,
+        y: service.y,
+        layoutPositioning: "layoutPositioning" in service ? service.layoutPositioning : null,
+        firstTranslation: isMotionNode(service) ? {
+          x: service.manualKeyframeTracks.TRANSLATION_X?.keyframes[0]?.value ?? null,
+          y: service.manualKeyframeTracks.TRANSLATION_Y?.keyframes[0]?.value ?? null,
+        } : null,
+      });
+    }
+    sources.push({
+      id: node.id,
+      name: node.name,
+      parent: parent ? { id: parent.id, name: parent.name,
+        layoutMode: "layoutMode" in parent ? parent.layoutMode : null } : null,
+      layoutPositioning: "layoutPositioning" in node ? node.layoutPositioning : null,
+      x: node.x, y: node.y, width: node.width, height: node.height,
+      relativeTransform: node.relativeTransform,
+      absoluteBoundingBox: node.absoluteBoundingBox,
+      frame: frame ? { id: frame.id, width: frame.width, height: frame.height,
+        absoluteBoundingBox: frame.absoluteBoundingBox } : null,
+      centerBeforeApply: diagnosticSettings?.other.centerBeforeApply ?? null,
+      storedCenterOffset: marker?.centerOffset ?? null,
+      layoutCenterOffset: autoLayoutCenterOffset(node),
+      effectiveCenterOffset: diagnosticSettings?.other.centerBeforeApply ? sourceCenterOffset(node) : { x: 0, y: 0 },
+      firstTranslation,
+      firstCenterInFrame: firstTranslation && frame && parent?.id === frame.id
+        ? { x: node.x + node.width / 2 + firstTranslation.x,
+          y: node.y + node.height / 2 + firstTranslation.y }
+        : null,
+      serviceCount: marker?.serviceIds?.length ?? 0,
+      services,
+    });
+  }
+  return { targetCount: diagnosticTargetIds.length, sources };
+}
+
+async function captureDiagnosticBefore(settings: MotionSettings): Promise<void> {
+  diagnosticSettings = settings;
+  diagnosticTargetIds = resolveTargets(settings.other.scope).map((node) => node.id);
+  try { diagnosticBefore = await captureDiagnosticScene(); }
+  catch (error) { logDiagnostic("snapshot.before.failed", { error: String(error) }); }
+}
+
+async function captureDiagnosticAfter(): Promise<void> {
+  if (!diagnosticTargetIds.length) return;
+  try { diagnosticAfter = await captureDiagnosticScene(); }
+  catch (error) { logDiagnostic("snapshot.after.failed", { error: String(error) }); }
 }
 
 function findMarkedPageNodes(): SceneNode[] {
@@ -789,6 +893,9 @@ async function ensureBackCopies(
   )).filter(isLiveNode);
   const sourceParent = tryGetParent(source);
   const sourceParentId = hasSceneChildren(sourceParent) ? sourceParent.id : null;
+  // Cloning a child of auto layout temporarily joins the flow. Preserve the
+  // source's resting position so service layers can be taken out of that flow.
+  const sourceTransform = source.relativeTransform;
   // Page scans can retain stale proxy objects after an interrupted refresh.
   // Resolve candidates again before touching their effects or animation tracks.
   const resolvedCopies = await Promise.all(
@@ -862,10 +969,34 @@ async function ensureBackCopies(
     ) {
       throw new Error(`Service layer ${layer + 1} became unavailable after insertion.`);
     }
+    const finalizedParent = tryGetParent(finalizedCopy);
+    if (finalizedParent && "layoutMode" in finalizedParent && finalizedParent.layoutMode !== "NONE" &&
+      "layoutPositioning" in finalizedCopy) {
+      finalizedCopy.layoutPositioning = "ABSOLUTE";
+      finalizedCopy.relativeTransform = sourceTransform;
+    }
     finalizedCopy.name = `${sourceName} · Orbit Depth ${layer + 1} (service)`;
     setOrbitRelaunch(finalizedCopy);
     nodeIds.push(copyId);
     claimedServiceIds.add(copyId);
+  }
+  // Old versions left service copies in the flow. Removing several of them
+  // can move the source, so align every copy after the final layout reflow.
+  const finalSource = await figma.getNodeByIdAsync(sourceId);
+  const finalParent = finalSource && finalSource.type !== "DOCUMENT" && finalSource.type !== "PAGE"
+    ? tryGetParent(finalSource)
+    : null;
+  if (finalSource && finalSource.type !== "DOCUMENT" && finalSource.type !== "PAGE" &&
+    finalParent && "layoutMode" in finalParent && finalParent.layoutMode !== "NONE") {
+    const finalTransform = finalSource.relativeTransform;
+    for (const id of nodeIds) {
+      const copy = await figma.getNodeByIdAsync(id);
+      if (copy && copy.type !== "DOCUMENT" && copy.type !== "PAGE" &&
+        isMotionNode(copy) && "layoutPositioning" in copy) {
+        copy.layoutPositioning = "ABSOLUTE";
+        copy.relativeTransform = finalTransform;
+      }
+    }
   }
   // Surplus removal is deliberately deferred until every replacement track
   // has been written successfully. Otherwise one failing setter leaves holes.
@@ -1173,6 +1304,7 @@ async function applyReferenceMotion(settings: MotionSettings): Promise<void> {
   }
   for(const id of oldServices){const node=await figma.getNodeByIdAsync(id);if(node&&node.type!=="DOCUMENT"&&node.type!=="PAGE")await removeNodeSafely(node);}
   logDiagnostic("reference.completed", { rootId, removedOldServices: oldServices.size });
+  await captureDiagnosticAfter();
   post({type:"result",kind:"success",message:`${presetLabel}: ${targets.length} cards, ${instances.length} editable native instances.`});
   post({type:"selection",selection:selectionSummary()});
 }
@@ -1184,6 +1316,7 @@ async function applyMotion(settings: MotionSettings): Promise<void> {
       ? "Sections can't be animated. Select the cards inside a frame."
       : "Sections can't be animated. Select a frame or layers inside it.");
   }
+  await captureDiagnosticBefore(settings);
   logDiagnostic("apply.route", {
     preset: settings.preset,
     renderer: nativeDefinition ? "reference" : "trajectory",
@@ -1294,12 +1427,12 @@ async function applyMotion(settings: MotionSettings): Promise<void> {
       ...fittedSettings,
       motion: { ...fittedSettings.motion, keyframes: internalKeyframeSamples },
     }, index, targets.length);
-    const originalCenterOffset = sourceCenterOffset(node);
-    const centerOffset = settings.other.centerBeforeApply
+    let originalCenterOffset = sourceCenterOffset(node);
+    let centerOffset = settings.other.centerBeforeApply
       ? originalCenterOffset
       : { x: 0, y: 0 };
     const preserveSamples = settings.geometry.shape === "falling-stack";
-    const transformTracks = prepareTransformTracks(frames, centerOffset, preserveSamples);
+    let transformTracks = prepareTransformTracks(frames, centerOffset, preserveSamples);
     const baseOpacity = sourceBaseOpacity(node);
     const targetParent = tryGetParent(node);
     const targetParentId = hasSceneChildren(targetParent) ? targetParent.id : null;
@@ -1331,6 +1464,16 @@ async function applyMotion(settings: MotionSettings): Promise<void> {
           claimedAttemptIds = [...backCopyIds];
           createdIds = ensured.createdIds;
           surplusIds = ensured.surplusIds;
+          // Converting legacy in-flow services to absolute positioning can
+          // move auto-layout sources. Build tracks from the settled layout.
+          const settledSource = await figma.getNodeByIdAsync(targetId);
+          if (settledSource && settledSource.type !== "DOCUMENT" && settledSource.type !== "PAGE" &&
+            isMotionNode(settledSource)) {
+            originalCenterOffset = sourceCenterOffset(settledSource);
+            centerOffset = settings.other.centerBeforeApply
+              ? originalCenterOffset : { x: 0, y: 0 };
+            transformTracks = prepareTransformTracks(frames, centerOffset, preserveSamples);
+          }
           logDiagnostic("trajectory.services.prepared", {
             targetId,
             attempt: attempt + 1,
@@ -1395,6 +1538,18 @@ async function applyMotion(settings: MotionSettings): Promise<void> {
         ) {
           throw new Error("The source layer became unavailable after duplicating services.");
         }
+        logDiagnostic("trajectory.center", {
+          sourceId: targetId,
+          centerBeforeApply: settings.other.centerBeforeApply,
+          storedCenterOffset: readOrbitMarker(sourceForTracks)?.centerOffset ?? null,
+          layoutCenterOffset: autoLayoutCenterOffset(sourceForTracks),
+          appliedCenterOffset: centerOffset,
+          firstPathPoint: { x: frames[0].x, y: frames[0].y },
+          firstTrackTranslation: {
+            x: centerOffset.x + frames[0].x,
+            y: centerOffset.y + frames[0].y,
+          },
+        });
         const shadowEffect = applyManagedFrontShadow(
           sourceForTracks,
           settings.appearance.frontShadow,
@@ -1668,6 +1823,8 @@ async function applyMotion(settings: MotionSettings): Promise<void> {
 
   logDiagnostic("trajectory.completed", { changedCount: changed.length, failureCount: failures.length });
 
+  await captureDiagnosticAfter();
+
   post({
     type: "result",
     kind: "success",
@@ -1889,6 +2046,7 @@ async function clearMotion(_scope: TargetScope, recoveryAttempt=false): Promise<
     throw new Error("Motion Loops could not clear motion from the selected layers.");
   }
   logDiagnostic("clear.completed", { cleared, removedServiceCount: removedServiceIds.size });
+  await captureDiagnosticAfter();
   post({
     type: "result",
     kind: "success",
@@ -1924,7 +2082,12 @@ figma.ui.onmessage = async (message: UiToPluginMessage) => {
       }
     }
     if (message.type === "apply") await applyMotion("version" in message.settings ? fromMotionDocument(validateMotionDocument(message.settings)) : message.settings);
-    if (message.type === "clear") await clearMotion(message.scope);
+    if (message.type === "clear") {
+      diagnosticTargetIds = resolveTargets(message.scope, true).map((node) => node.id);
+      try { diagnosticBefore = await captureDiagnosticScene(); }
+      catch (error) { logDiagnostic("snapshot.before.failed", { error: String(error) }); }
+      await clearMotion(message.scope);
+    }
     if (message.type === "refresh-selection") sendSelection();
     if (message.type === "resize") {
       const height = Math.round(
@@ -1933,6 +2096,7 @@ figma.ui.onmessage = async (message: UiToPluginMessage) => {
       figma.ui.resize(pluginWidth, height);
     }
   } catch (error) {
+    await captureDiagnosticAfter();
     logDiagnostic("operation.failed", {
       error: error instanceof Error ? error.message : String(error),
     });

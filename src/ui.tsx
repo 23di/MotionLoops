@@ -33,7 +33,7 @@ const panelId = "orbit-motion-controls-v8";
 const legacyPanelId = "orbit-motion-controls-v7";
 
 const builtInPresetSchemaKey = "orbit-built-in-preset-schema";
-const builtInPresetSchemaVersion = "21";
+const builtInPresetSchemaVersion = "22";
 let builtInPresetSchemaMigratedInSession = false;
 
 function migrateLegacyDialkitStorage(): void {
@@ -295,10 +295,27 @@ function GeometryPathEditor({ settings, target }: { settings: MotionSettings; ta
     source.width,
     source.height,
   );
-  const radiusX = fitted.geometry.radiusX / frameWidth * viewWidth;
-  const radiusY = fitted.geometry.radiusY / frameHeight * viewHeight;
+  const rawRadiusX = fitted.geometry.radiusX / frameWidth * viewWidth;
+  const rawRadiusY = fitted.geometry.radiusY / frameHeight * viewHeight;
   const circleRotation = settings.geometry.circleRotation ?? 0;
   const orbitOrientation = supportsOrbitOrientation(settings.geometry) && settings.geometry.shape !== "custom-path";
+  // The editable ellipse is the projected base shape, independent of pulse,
+  // depth waves and the number of turns in its animation.
+  const ellipseTiltScale = orbitOrientation && settings.geometry.shape === "ellipse"
+    ? Math.cos(settings.geometry.tilt * Math.PI / 180) : 1;
+  const projectionAngle = circleRotation * Math.PI / 180;
+  const rawProjectedY = rawRadiusY * Math.abs(ellipseTiltScale);
+  const ellipseBoundsX = Math.hypot(rawRadiusX * Math.cos(projectionAngle), rawProjectedY * Math.sin(projectionAngle));
+  const ellipseBoundsY = Math.hypot(rawRadiusX * Math.sin(projectionAngle), rawProjectedY * Math.cos(projectionAngle));
+  // Reserve room for both the side rotation handle and the tilt guide.
+  // This is a camera scale only; the animation's dimensions stay unchanged.
+  const editorScale = settings.geometry.shape === "ellipse" ? Math.min(1,
+    Math.max(1, viewWidth / 2 - 40) / Math.max(1, ellipseBoundsX),
+    Math.max(1, viewHeight / 2 - 30) / Math.max(1, ellipseBoundsY),
+  ) : 1;
+  const radiusX = rawRadiusX * editorScale;
+  const radiusY = rawRadiusY * editorScale;
+  const projectedRadiusY = radiusY * Math.abs(ellipseTiltScale);
   const renderOrbitPreview = !supportsPathGeometry(settings.geometry.shape);
   const orbitPathCount = settings.geometry.shape === "sphere"
     ? Math.min(Math.max(target.count || 9, 2), 24)
@@ -322,10 +339,20 @@ function GeometryPathEditor({ settings, target }: { settings: MotionSettings; ta
   const centerX = viewWidth / 2;
   const centerY = viewHeight / 2;
   const orbitRotationRadians = circleRotation * Math.PI / 180;
-  const orientationRadius = Math.max(28, Math.min(viewWidth, viewHeight) / 2 - 14);
+  const rotationCos = Math.cos(orbitRotationRadians);
+  const rotationSin = Math.sin(orbitRotationRadians);
+  const rotationRoom = Math.min(
+    (centerX - 10) / Math.max(Math.abs(rotationCos), 1e-6),
+    (centerY - 10) / Math.max(Math.abs(rotationSin), 1e-6),
+  );
+  const orientationRadius = Math.min(radiusX + 20, rotationRoom);
+  const rotationAnchor = {
+    x: centerX + rotationCos * Math.max(0, orientationRadius - 20),
+    y: centerY + rotationSin * Math.max(0, orientationRadius - 20),
+  };
   const rotationHandle = {
-    x: centerX + Math.cos(orbitRotationRadians) * orientationRadius,
-    y: centerY + Math.sin(orbitRotationRadians) * orientationRadius,
+    x: centerX + rotationCos * orientationRadius,
+    y: centerY + rotationSin * orientationRadius,
   };
   const tiltTravel = Math.max(20, Math.min(56, viewHeight / 2 - 16));
   const tiltGuideX = 14;
@@ -373,10 +400,10 @@ function GeometryPathEditor({ settings, target }: { settings: MotionSettings; ta
       const localX = dx * Math.cos(radians) - dy * Math.sin(radians);
       const localY = dx * Math.sin(radians) + dy * Math.cos(radians);
       if (activeHandle.current === "x") {
-        const normalized = Math.abs(localX) / bounds.width;
+        const normalized = Math.abs(localX) / bounds.width / editorScale;
         updateLegacyValue("geometry.radiusX", Math.round(normalized * 100));
       } else {
-        const normalized = Math.abs(localY) / bounds.height;
+        const normalized = Math.abs(localY) / bounds.height / editorScale / Math.max(0.05, Math.abs(ellipseTiltScale));
         updateLegacyValue("geometry.radiusY", Math.round(normalized * 100));
       }
       return;
@@ -419,9 +446,9 @@ function GeometryPathEditor({ settings, target }: { settings: MotionSettings; ta
         <polyline className="orbit-path-line orbit-path-line-preview" points={previewPath} key={index} />
       )) : settings.geometry.shape === "ellipse" ? (
         <g transform={`rotate(${circleRotation} ${centerX} ${centerY})`}>
-          <ellipse className="orbit-path-line" cx={centerX} cy={centerY} rx={radiusX} ry={radiusY} />
-          {!settings.geometry.dynamicScale && <circle className="orbit-path-handle" cx={centerX + radiusX} cy={centerY} r="6" onPointerDown={(event) => startHandle(event, "x")} />}
-          {!settings.geometry.dynamicScale && <circle className="orbit-path-handle" cx={centerX} cy={centerY + radiusY} r="6" onPointerDown={(event) => startHandle(event, "y")} />}
+          <ellipse className="orbit-path-line" cx={centerX} cy={centerY} rx={radiusX} ry={projectedRadiusY} />
+          {!settings.geometry.dynamicScale && !orbitOrientation && <circle className="orbit-path-handle" cx={centerX + radiusX} cy={centerY} r="6" onPointerDown={(event) => startHandle(event, "x")} />}
+          {!settings.geometry.dynamicScale && !orbitOrientation && <circle className="orbit-path-handle" cx={centerX} cy={centerY + projectedRadiusY} r="6" onPointerDown={(event) => startHandle(event, "y")} />}
         </g>
       ) : points.length > 1 ? <polyline className="orbit-path-line" points={polyline} /> : null}
       {orbitOrientation && (
@@ -429,10 +456,10 @@ function GeometryPathEditor({ settings, target }: { settings: MotionSettings; ta
           {!settings.geometry.dynamicScale && (
             <g transform={`rotate(${circleRotation} ${centerX} ${centerY})`}>
               <circle className="orbit-path-handle" cx={centerX + radiusX} cy={centerY} r="6" aria-label="Adjust orbit width" onPointerDown={(event) => startHandle(event, "x")} />
-              <circle className="orbit-path-handle" cx={centerX} cy={centerY + radiusY} r="6" aria-label="Adjust orbit height" onPointerDown={(event) => startHandle(event, "y")} />
+              <circle className="orbit-path-handle" cx={centerX} cy={centerY + projectedRadiusY} r="6" aria-label="Adjust orbit height" onPointerDown={(event) => startHandle(event, "y")} />
             </g>
           )}
-          <line className="orbit-handle-guide" x1={centerX} y1={centerY} x2={rotationHandle.x} y2={rotationHandle.y} />
+          <line className="orbit-handle-guide" x1={rotationAnchor.x} y1={rotationAnchor.y} x2={rotationHandle.x} y2={rotationHandle.y} />
           <circle className="orbit-path-handle orbit-rotation-handle" cx={rotationHandle.x} cy={rotationHandle.y} r="6" aria-label="Rotate orbit" onPointerDown={(event) => startHandle(event, "rotation")} />
           <line className="orbit-handle-guide" x1={tiltGuideX} y1={centerY - tiltTravel} x2={tiltGuideX} y2={centerY + tiltTravel} />
           <circle className="orbit-path-handle orbit-tilt-handle" cx={tiltGuideX} cy={tiltHandleY} r="6" aria-label="Tilt orbit" onPointerDown={(event) => startHandle(event, "tilt")} />
@@ -1051,6 +1078,7 @@ function App() {
     const migrateBuiltIns = shouldMigrateBuiltInPresets();
     const obsoletePresets = storedPresets.filter((preset) => (
       preset.name === "Album Wall" || preset.name === "Tunnel" ||
+      preset.name === "Ripple" || preset.name === "Tile Wave" ||
       (migrateBuiltIns && builtInNames.has(preset.name as typeof presetOptions[number]["label"]))
     ));
     const removedActivePreset = obsoletePresets.some(
@@ -1240,7 +1268,8 @@ function App() {
   };
 
   const savedPresets = DialStore.getPresets(panelId)
-    .filter((item) => !presetOptions.some((preset) => preset.label === item.name) && item.name !== "Version 1")
+    .filter((item) => !presetOptions.some((preset) => preset.label === item.name) &&
+      item.name !== "Version 1" && item.name !== "Ripple" && item.name !== "Tile Wave")
     .map((item) => ({...item, settings: settingsFromSaved(item.values, effectiveValues)}));
   const saveCurrent = () => {
     const base = familyFor(effectiveValues.preset).name;

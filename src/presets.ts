@@ -1,5 +1,6 @@
 import type { MotionSettings, LegacyPresetId as PresetId } from "./types";
 import type { EditorSchema } from "./editor-schema";
+import { orbitOneGeometry, orbitOneAppearance } from "./motion-modifiers";
 
 export type PresetTuning = {
   editor?: EditorSchema;
@@ -41,6 +42,12 @@ export const builtInPresetTunings: Record<PresetId, PresetTuning> = {
     motion: { duration: 8 },
     geometry: parametric({ shape: "crosscurrent", radiusX: 46, radiusY: 38, depth: 30, tilt: 0, rotation: 0 }),
     appearance: { nearScale: 1, farScale: 0.86, farOpacity: 1 },
+  },
+  bloom: {
+    motion: { duration: 4, stagger: 0, radiusPulse: 1, scalePulse: .8, opacityPulse: 1, depthPulse: .6 },
+    geometry: parametric({ ...orbitOneGeometry, shape: "ellipse", radiusX: 60, radiusY: 40,
+      pathScale: .6, circleRotation: -13, tilt: -50, turns: 1 }),
+    appearance: orbitOneAppearance,
   },
   "tile-wave": {
     motion: { duration: 7 },
@@ -92,15 +99,8 @@ export const builtInPresetTunings: Record<PresetId, PresetTuning> = {
     appearance: { nearScale: 1.22, farScale: 0.54, farOpacity: 0.26 },
   },
   "orbit-3d-tilted": {
-    geometry: parametric({
-      orient3d: true,
-      yAmplitude: 0.65,
-      depth: 77.5,
-      tilt: 42,
-      circleRotation: -28,
-      rotation: 0,
-    }),
-    appearance: { cardSize: 30, nearScale: 1.24, farScale: 0.52, farOpacity: 0.25 },
+    geometry: parametric(orbitOneGeometry),
+    appearance: orbitOneAppearance,
   },
   "orbit-3d-helix": {
     geometry: parametric({ orient3d: true, yFrequency: 2, yAmplitude: 0.72, depth: 75, tilt: 0, turns: 1, rotation: 0 }),

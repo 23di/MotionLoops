@@ -1,3 +1,4 @@
+import { pointForGeometry } from "./engine";
 import { referenceDefinition } from "./reference-catalog";
 import type { MotionSettings } from "./types";
 import { motifScene } from "./motif-engine";
@@ -130,7 +131,20 @@ export function referenceScene(settings: MotionSettings, sizes: readonly SourceS
     }
     for(const [layer,card] of prepared.entries()){
       if(card.width<.5*height/1080)continue;
-      add(card.source,layer,card.x,card.y,card.width+overlap,card.width/(sizes[card.source].width/sizes[card.source].height)+overlap,solo?0:card.rotation);
+      let x=card.x,y=card.y;
+      if(str("pathShape","line")!=="line"){
+        // Change only the route: Row still owns progress, pauses, stagger,
+        // packing, focus scaling and the visible population.
+        const location=vertical?card.y-height/2-offsetY:card.x-width/2-offsetX;
+        const angle=location/Math.max(1,extent)*Math.PI*2;
+        const pathSettings={...settings,motion:{...settings.motion,radiusPulse:0,scalePulse:0,opacityPulse:0,depthPulse:0},
+          geometry:{...settings.geometry,shape:str("pathShape","ellipse") as MotionSettings["geometry"]["shape"],orient3d:false,circleRotation:0}};
+        const point=pointForGeometry(angle,pathSettings,card.source,count);
+        const rotation=(settings.geometry.circleRotation??0)*Math.PI/180;
+        x=width/2+(point.x*Math.cos(rotation)-point.y*Math.sin(rotation))*width/100+offsetX;
+        y=height/2+(point.x*Math.sin(rotation)+point.y*Math.cos(rotation))*height/100+offsetY;
+      }
+      add(card.source,layer,x,y,card.width+overlap,card.width/(sizes[card.source].width/sizes[card.source].height)+overlap,solo?0:card.rotation);
       if(scales&&focus==="center")cards[cards.length-1].opacity=1-card.shade;
       else cards[cards.length-1].shade=card.shade>.01?card.shade:0;
     }

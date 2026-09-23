@@ -15,6 +15,10 @@ export const controls = {
     _collapsed: true,
     duration: [5, 0.4, 12, 0.1],
     stagger: [0, 0, 1.5, 0.01],
+    radiusPulse: [0, 0, 1, 0.01],
+    scalePulse: [0, 0, 1, 0.01],
+    opacityPulse: [0, 0, 1, 0.01],
+    depthPulse: [0, 0, 1, 0.01],
     direction: {
       type: "select",
       options: [
@@ -65,6 +69,7 @@ export const controls = {
     dynamicScale: true,
     radiusX: [50, 0, 100, 1],
     radiusY: [40, 0, 100, 1],
+    pathScale: [1, 0, 2, 0.01],
     circleRotation: [0, -180, 180, 1],
     depth: [65, 0, 200, 1],
     tilt: [28, -90, 90, 1],

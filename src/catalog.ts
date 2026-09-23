@@ -4,6 +4,7 @@ import { schemaForShape, type EditorSchema } from "./editor-schema";
 import { referencePreset, referenceDefinition, activeReferencePresets } from "./reference-catalog";
 import { recipeKey } from "./preset-presentation";
 import { preferredSettings } from "./preferred-numbers";
+import { pulseDefaults } from "./motion-modifiers";
 import { referenceEditor, referenceDefaults } from "./reference-controls";
 import type { MotionSettings, PresetId } from "./types";
 import { documentFromValues, fromMotionDocument, toMotionDocument } from "./motion-system";
@@ -21,7 +22,7 @@ export const families: { name: string; description: string; variants: { id: Pres
   ] },
   { name: "Globe", description: "A rotating cloud of cards", variants: [{ id: "orbit-3d-sphere", name: "Globe" }] },
   { name: "Coil", description: "Cards sweep in and out around the center", variants: [{ id: "vortex", name: "Coil" }] },
-  { name: "Ripple", description: "A grid rises diagonally, holds, then dissolves outward", variants: [{ id: "tile-wave", name: "Ripple" }] },
+  { name: "Bloom", description: "Cards gather, open like petals, then return", variants: [{ id: "bloom", name: "Bloom" }] },
   { name: "Racetrack", description: "Cards circulate around a wide spatial track", variants: [{ id: "racetrack", name: "Racetrack" }] },
 ];
 
@@ -50,9 +51,10 @@ function presetSettings(id: PresetId, previous?: MotionSettings): MotionSettings
   return {
     preset: id,
     renderer: "legacy",
-    motion: { duration: 5, stagger: 0, keyframes: 32, direction: "clockwise", fullCycle: { type: "easing", duration: 1, ease: [0, 0, 1, 1] }, ...tuning.motion },
+    motion: { duration: 5, stagger: 0, keyframes: 32, direction: "clockwise", fullCycle: { type: "easing", duration: 1, ease: [0, 0, 1, 1] }, ...pulseDefaults, ...tuning.motion },
     geometry: {
       units: "percent", shape: "parametric", dynamicScale: true,
+      pathScale: 1,
       customPath: "[[0,0.5],[1,0.5]]", radiusX: 50, radiusY: 40, circleRotation: 0,
       depth: 65, tilt: 0, turns: 1, rotation: 0, orient3d: false,
       xWave: "cos", yWave: "sin", depthWave: "sin", xFrequency: 1, yFrequency: 1, depthFrequency: 1,

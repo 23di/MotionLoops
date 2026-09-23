@@ -5,6 +5,7 @@ import type {
   OpacityCurve,
   WaveFunction,
 } from "./types";
+import { migrateBloomSettings } from "./motion-modifiers";
 
 export interface PointState {
   radius?: number;
@@ -96,6 +97,7 @@ export function fitSettingsToFrame(
   itemHeight: number,
   count = 1,
 ): MotionSettings {
+  settings = migrateBloomSettings(settings);
   if (
     frameWidth <= 0 ||
     frameHeight <= 0 ||
@@ -331,6 +333,7 @@ export function pointForGeometry(
   index = 0,
   count = 1,
 ): PointState {
+  settings = migrateBloomSettings(settings);
   const {
     radiusX: rx,
     radiusY: ry,
@@ -593,6 +596,16 @@ export function pointForGeometry(
     }
   }
 
+  // Independent motion modifiers compose with any trajectory. Their phase
+  // retains stagger but excludes the static distribution of cards on the path.
+  const pulse = smoothStep01((1 - Math.cos(angle - itemPhase)) / 2);
+  const radialScale = (settings.geometry.pathScale ?? 1) *
+    (1 - (settings.motion.radiusPulse ?? 0) * (1 - pulse));
+  z += depth * (settings.motion.depthPulse ?? 0) * (2 * pulse - 1);
+  scaleXMultiplier *= 1 - (settings.motion.scalePulse ?? 0) * (1 - pulse);
+  scaleYMultiplier *= 1 - (settings.motion.scalePulse ?? 0) * (1 - pulse);
+  opacityMultiplier *= 1 - (settings.motion.opacityPulse ?? 0) * (1 - pulse);
+
   if (supportsOrbitOrientation(settings.geometry)) {
     const depthOnCanvas = depth > 0 ? (z / depth) * orbitPlaneScaleY : 0;
     const tiltedY = y * Math.cos(tiltRad) - depthOnCanvas * Math.sin(tiltRad);
@@ -608,6 +621,10 @@ export function pointForGeometry(
     pathAngle += orbitRotation;
   }
 
+  // Resize the projected path only. Keep depth, card sizes, opacity and
+  // layer ordering exactly as in the unmodified orbit.
+  x *= radialScale;
+  y *= radialScale;
   const d = normalizedDepth(z, Math.max(depth, 1));
   const scale = settings.appearance.farScale +
     d * (settings.appearance.nearScale - settings.appearance.farScale);

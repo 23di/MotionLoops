@@ -70,11 +70,40 @@ assert(motionFingerprint({...baseline, motion: {...baseline.motion, duration: 9}
 assert.equal(motionFingerprint({...baseline, other: {...baseline.other, scope: "children"}}), motionFingerprint(baseline), "Changing selection scope is not a new preset");
 assert.equal(new Set(ids).size, ids.length, "Variants must not repeat between families");
 assert(!ids.includes("pendulum"), "Swing must be retired from the active catalog");
-assert.equal(families.length, 9, "The active legacy catalog excludes Counterflow");
+assert.equal(families.length, 9, "Bloom replaces Ripple in the active catalog");
 assert(!ids.includes("crosscurrent"), "Counterflow must be retired from the active gallery");
+assert(!ids.includes("tile-wave"), "Ripple must be retired from the active gallery");
+assert(ids.includes("bloom"), "Bloom must appear in the active gallery");
+assert(!presetOptions.some(option=>String(option.value)==="tile-wave"), "Ripple must not be an active built-in preset");
+const retiredRipple=freshPreset("tile-wave");
+assert.deepEqual(parseSettingsJson(serializeSettingsJson(retiredRipple),retiredRipple),retiredRipple,"Existing Ripple JSON remains readable");
 assert.equal(families.find(f=>f.variants.some(v=>v.id==="orbit-3d-ring"))?.name,"Cilinder","Circuit is renamed");
 for(const id of ["orbit-3d-tilted","orbit-3d-helix","orbit-3d-eight"] as const)assert(ids.includes(id),"Restored orbit: "+id);
 assert(!ids.includes("cover-flow")&&!ids.includes("falling-stack"), "Focus and Cascade are retired from the gallery");
+
+const bloom=freshPreset("bloom");
+const fittedBloom=fitSettingsToFrame(bloom,576,264,120,120,8);
+for(let index=0;index<8;index++){
+  const frames=generateNodeKeyframes(fittedBloom,index,8);
+  for(const frame of frames){
+    assert(Math.abs(frame.x)+frame.scaleX*60<=288+1e-6,"Bloom stays inside the flag frame horizontally");
+    assert(Math.abs(frame.y)+frame.scaleY*60<=132+1e-6,"Bloom stays inside the flag frame vertically");
+  }
+}
+assert(Math.abs(generateNodeKeyframes(fittedBloom,0,8)[0].x)<25,"Bloom starts gathered around the center");
+const bloomTurn=generateNodeKeyframes(fittedBloom,0,8);
+assert.equal(bloom.geometry.turns,1,"Bloom defaults to one complete turn");
+assert(Math.hypot(bloomTurn[0].x,bloomTurn[0].y)<1e-9&&Math.hypot(bloomTurn[32].x,bloomTurn[32].y)<1e-9,
+  "User Bloom radius collapses to the center at both cycle endpoints");
+const staggeredBloom={...bloom,motion:{...bloom.motion,stagger:0.8}};
+const staggeredFrame=generateNodeKeyframes(fitSettingsToFrame(staggeredBloom,576,264,120,120,8),1,8)[4];
+const regularFrame=generateNodeKeyframes(fittedBloom,1,8)[4];
+assert(Math.hypot(staggeredFrame.x-regularFrame.x,staggeredFrame.y-regularFrame.y)>5,
+  "Bloom Stagger visibly shifts the next card's phase");
+const doubledBloom={...bloom,geometry:{...bloom.geometry,turns:2}};
+const doubledFrame=generateNodeKeyframes(fitSettingsToFrame(doubledBloom,576,264,120,120,8),0,8)[8];
+assert(Math.hypot(doubledFrame.x-bloomTurn[8].x,doubledFrame.y-bloomTurn[8].y)>10,
+  "Bloom Turns changes the number of revolutions");
 
 function trace(settings: MotionSettings, count = 5, width = 720, height = 400) {
   const fitted = fitSettingsToFrame(settings, width, height, width / 9, height / 4, count);

@@ -1,6 +1,6 @@
 export const presetOptions = [
   { value: "crosscurrent", label: "Crosscurrent" },
-  { value: "tile-wave", label: "Tile Wave" },
+  { value: "bloom", label: "Bloom" },
   { value: "circle", label: "Circle" },
   { value: "path-wave", label: "Path wave" },
   { value: "vision", label: "Vision focus" },
@@ -24,7 +24,7 @@ export const presetOptions = [
   { value: "depth-blur", label: "Depth Blur" },
 ] as const;
 
-export type LegacyPresetId = (typeof presetOptions)[number]["value"];
+export type LegacyPresetId = (typeof presetOptions)[number]["value"] | "tile-wave";
 export type PresetId = LegacyPresetId | import("./reference-catalog").ReferencePresetId;
 export type TargetScope = "selection" | "children" | "deep";
 export type Direction = "clockwise" | "counterclockwise";
@@ -77,6 +77,10 @@ export interface MotionSettings {
     keyframes: number;
     direction: Direction;
     fullCycle: DialTransition;
+    radiusPulse?: number;
+    scalePulse?: number;
+    opacityPulse?: number;
+    depthPulse?: number;
   };
   geometry: {
     units: GeometryUnits;
@@ -85,6 +89,7 @@ export interface MotionSettings {
     customPath: string;
     radiusX: number;
     radiusY: number;
+    pathScale?: number;
     circleRotation: number;
     depth: number;
     tilt: number;

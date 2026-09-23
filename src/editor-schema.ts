@@ -42,6 +42,8 @@ export const editorSchemas: Record<GeometryShape, EditorSchema> = {
 export function editorPaths(schema: EditorSchema): Set<string> {
   return new Set(schema.controls ?? [
     "motion.duration", "motion.stagger", "motion.fullCycle",
+    "motion.radiusPulse", "motion.scalePulse", "motion.opacityPulse", "motion.depthPulse",
+    "geometry.pathScale",
     "geometry.shape", "geometry.dynamicScale",
     ...schema.geometry.map(key => `geometry.${key}`),
     "appearance", "other",

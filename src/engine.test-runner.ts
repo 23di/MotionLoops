@@ -112,7 +112,7 @@ function trajectoryDistance(left: MotionSettings, right: MotionSettings): number
   return Math.sqrt(squaredDistance / samples);
 }
 
-assert(presetOptions.length === 23, "Expected supported presets including legacy ids and two new motions");
+assert(presetOptions.length === 23, "Bloom replaces Ripple in active built-in presets");
 assert(!presetOptions.some((preset) => String(preset.value) === "tunnel"), "Tunnel preset must not remain in the catalog");
 assert(
   presetOptions.filter((preset) => preset.value.startsWith("orbit-3d")).length === 6,
@@ -668,3 +668,20 @@ for (const preset of presetOptions) {
 }
 
 console.log("Orbit engine: all checks passed");
+
+// The radius animation must be Orbit 01 with only its screen-space path scaled.
+const orbitTuning=builtInPresetTunings["orbit-3d-tilted"];
+const orbitBase:MotionSettings={...settings,geometry:{...settings.geometry,...orbitTuning.geometry},
+  appearance:{...settings.appearance,...orbitTuning.appearance},
+  motion:{...settings.motion,radiusPulse:0,scalePulse:0,opacityPulse:0,depthPulse:0}};
+for(let step=0;step<=48;step++)for(let index=0;index<8;index++){
+  const angle=step/48*Math.PI*2+index/8*Math.PI*2;
+  const original=pointForGeometry(angle,orbitBase,index,8);
+  const pulsed=pointForGeometry(angle,{...orbitBase,motion:{...orbitBase.motion,radiusPulse:.92}},index,8);
+  for(const key of ["z","scaleX","scaleY","opacity","rotation"] as const)
+    assert(Math.abs(original[key]-pulsed[key])<1e-9,"Radius pulse must preserve Orbit 01 "+key);
+  const phase=(1-Math.cos(angle-index/8*Math.PI*2))/2;
+  const factor=1-.92*(1-phase*phase*(3-2*phase));
+  assert(Math.abs(pulsed.x-original.x*factor)<1e-9&&Math.abs(pulsed.y-original.y*factor)<1e-9,
+    "Radius pulse changes only the orbit radius, retaining its tilt and rotation");
+}

@@ -1,9 +1,10 @@
 import type { ReactNode } from "react";
-import { ControlRenderer, DialStore, Folder, TransitionControl, type ControlMeta } from "dialkit";
+import { ControlRenderer, DialStore, Folder, SelectControl, TransitionControl, type ControlMeta } from "dialkit";
 import { freshPreset } from "./catalog";
 import { documentValues, motionEditor, toMotionDocument } from "./motion-system";
 import type { MotionSettings } from "./types";
 import {DialKitRangeOverride} from "./dialkit-range-override";
+import { animationFor, animationOptions, applyAnimation } from "./animation-recipes";
 
 const libraryLinks = [
   { label: "DialKit · MIT", href: "https://www.dialkit.dev/" },
@@ -12,12 +13,14 @@ const libraryLinks = [
 ] as const;
 
 /** One renderer for every model. No preset/legacy/reference branches. */
-export function PresetEditor({settings,theme,panelId,shapeEditor,diagnosticsAction}:{
+export function PresetEditor({settings,onChange,theme,panelId,shapeEditor,diagnosticsAction}:{
   settings:MotionSettings; onChange:(settings:MotionSettings)=>void;
   theme:"light"|"dark";panelId:string;shapeEditor:ReactNode;
   diagnosticsAction?:ReactNode;
 }){
-  const schema=motionEditor(toMotionDocument(settings)),panel=DialStore.getPanel(panelId);
+  const document=toMotionDocument(settings);
+  const schema=motionEditor(document),panel=DialStore.getPanel(panelId);
+  const selectedAnimation=animationFor(settings);
   const flatten=(controls:ControlMeta[]):ControlMeta[]=>controls.flatMap(control=>control.children?flatten(control.children):[control]);
   const leaves=flatten(panel?.controls??[]),values=DialStore.getValues(panelId);
   const presetDefaults=documentValues(toMotionDocument(freshPreset(settings.preset,settings)));
@@ -60,6 +63,10 @@ export function PresetEditor({settings,theme,panelId,shapeEditor,diagnosticsActi
       </div>
       <Folder title="Motion Loops" isRoot inline open>
         {schema.sections.map(section=><Folder key={section.id} title={section.title} defaultOpen={false}>
+          {section.id==="motion"&&["trajectory","rfCarousel"].includes(document.model)&&<SelectControl label="Animation" value={selectedAnimation}
+            options={[...animationOptions.map(({value,label})=>({value,label})),
+              ...(selectedAnimation==="custom"?[{value:"custom",label:"Custom"}]:[])]}
+            onChange={value=>onChange(applyAnimation(settings,value))}/>}
           {section.id==="other"?renderOther():renderControls(controlsFor(section.bindings.filter(binding=>!binding.advanced)))}
           {section.bindings.some(binding=>binding.advanced)&&<Folder title="Advanced" defaultOpen={false}>
             {renderControls(controlsFor(section.bindings.filter(binding=>binding.advanced)))}

@@ -7,6 +7,7 @@ import { referencePresets } from "./reference-catalog";
 import { referenceScene } from "./reference-engine";
 import { cloneData } from "./clone-data";
 import { freshPreset } from "./catalog";
+import { pulseDefaults } from "./motion-modifiers";
 import { toMotionDocument } from "./motion-system";
 
 let nextId = 1;
@@ -29,6 +30,7 @@ const parent = {
   id: "frame-1",
   name: "Orbit Frame",
   type: "FRAME",
+  layoutMode: "NONE",
   parent: { type: "PAGE" },
   getPluginData: () => "",
   setRelaunchData(data: Record<string, string>) { parentRelaunchData = { ...data }; },
@@ -41,6 +43,16 @@ const parent = {
   },
   set children(children: any[]) {
     this._children = children;
+    this.reflow();
+  },
+  reflow() {
+    if (this.layoutMode === "NONE") return;
+    let x = 0;
+    for (const child of this._children) {
+      if (child.layoutPositioning === "ABSOLUTE") continue;
+      child.relativeTransform = [[1, 0, x], [0, 1, 0]];
+      x += child.width + 32;
+    }
   },
   insertChild(index: number, node: any) {
     insertChildCalls += 1;
@@ -51,6 +63,7 @@ const parent = {
     this._children = this._children.filter((child) => child.id !== node.id);
     this._children.splice(index, 0, node);
     node.parent = this;
+    this.reflow();
   },
 };
 nodes.set(parent.id, parent);
@@ -75,6 +88,9 @@ function makeNode(name: string): any {
     id: `node-${nextId++}`,
     name,
     type: "RECTANGLE",
+    _layoutPositioning: "AUTO",
+    get layoutPositioning(){return this._layoutPositioning;},
+    set layoutPositioning(value:string){this._layoutPositioning=value;this._parent.reflow?.();},
     width: 80,
     height: 100,
     opacity: 1,
@@ -817,8 +833,8 @@ for (const service of servicesBeforeCatalogWalk) {
 for (const preset of presetOptions) {
   const tuning = builtInPresetTunings[preset.value];
   settings.preset = preset.value;
-  Object.assign(settings.motion, tuning.motion);
-  Object.assign(settings.geometry, tuning.geometry);
+  Object.assign(settings.motion, pulseDefaults, tuning.motion);
+  Object.assign(settings.geometry, { pathScale: 1 }, tuning.geometry);
   Object.assign(settings.appearance, tuning.appearance);
   Object.assign(settings.other, tuning.other);
   await onMessage({ type: "apply", settings });
@@ -953,11 +969,12 @@ globalThis.figma.createRectangle=()=>{const node=makeNode("Rectangle");node.resi
   cards[0].clone=clone;
   await onMessage({type:"clear",scope:"selection"});
 }
-for(const preset of referencePresets){
+for(const preset of [...referencePresets,{...referencePresets.find(p=>p.id==="reference-carousel-05")!,label:"Queue ellipse",queueShape:"ellipse"}]){
   const cards=Array.from({length:3},(_,i)=>makeNode(`${preset.label} card ${i}`));
   for(const [index,card] of cards.entries()){card.relativeTransform=[[1,0,301+index*139],[0,1,423]];parent.insertChild(parent.children.length,card);}
   globalThis.figma.currentPage.selection=cards;
   const settings=freshPreset(preset.id),messageStart=postedMessages.length;
+  if("queueShape" in preset)settings.reference!.pathShape=preset.queueShape;
   if(preset.id==="reference-carousel-01")settings.motion.duration=200;
   await onMessage({type:"apply",settings:toMotionDocument(settings)});
   const errors=postedMessages.slice(messageStart).filter(m=>m.kind==="error");
@@ -1057,6 +1074,56 @@ for(const id of ["circle","orbit-3d-tilted","orbit-3d-helix","orbit-3d-eight"]){
   await onMessage({type:"clear",scope:"selection"});
   assert(!card.getPluginData("orbit-motion"),id+": canonical Clear");
 }
+
+const autoLayoutLead=makeNode("Auto layout lead");
+autoLayoutLead.width=120;
+const autoLayoutCard=makeNode("Auto layout card");
+const autoLayoutTail=makeNode("Auto layout tail");
+parent.children=[autoLayoutLead,autoLayoutCard,autoLayoutTail];
+for(const child of parent.children)child.parent=parent;
+parent.layoutMode="HORIZONTAL";
+parent.reflow();
+const originalCardX=autoLayoutCard.x;
+const originalTailX=autoLayoutTail.x;
+globalThis.figma.currentPage.selection=[autoLayoutCard];
+const autoLayoutSettings=freshPreset("circle");
+autoLayoutSettings.other.serviceLayers="2";
+for(let pass=0;pass<2;pass++){
+  const messageStart=postedMessages.length;
+  await onMessage({type:"apply",settings:autoLayoutSettings});
+  assert(!postedMessages.slice(messageStart).some(message=>message.kind==="error"),"Auto layout Apply and Refresh succeed");
+  const result=postedMessages.slice(messageStart).find(message=>message.type==="result"&&message.kind==="success");
+  const report=JSON.parse(result.diagnostics.split("\n").slice(1).join("\n"));
+  if(pass===0)assert.equal(report.before.sources[0].x,originalCardX,"Diagnostics capture source position before Apply");
+  else assert.notEqual(report.before.sources[0].x,originalCardX,"Diagnostics expose the legacy layout shift before Refresh");
+  assert.equal(report.after.sources[0].x,originalCardX,"Diagnostics capture source position after Apply");
+  if(pass===0)assert.deepEqual(report.before.sources[0].layoutCenterOffset,{x:168,y:150},"Diagnostics show the auto layout center offset");
+  assert.deepEqual(report.after.sources[0].effectiveCenterOffset,{x:168,y:150},"Diagnostics show the applied center offset");
+  if(pass===1)assert.deepEqual(report.before.sources[0].storedCenterOffset,{x:0,y:0},"Diagnostics expose a stale stored offset before Refresh");
+  const fitted=fitSettingsToFrame(autoLayoutSettings,720,400,autoLayoutCard.width,autoLayoutCard.height,1);
+  const firstFrame=generateNodeKeyframes({...fitted,motion:{...fitted.motion,keyframes:32}},0,1)[0];
+  assert(Math.abs(report.after.sources[0].firstTranslation.x-(168+firstFrame.x))<.01,"Auto layout X track includes the settled center offset");
+  assert(Math.abs(report.after.sources[0].firstTranslation.y-(150+firstFrame.y))<.01,"Auto layout Y track includes the settled center offset");
+  const services=JSON.parse(autoLayoutCard.getPluginData("orbit-motion")).serviceIds;
+  assert(services.length>0,"Auto layout test creates depth services");
+  for(const id of services){
+    const copy=nodes.get(id);
+    assert.equal(copy.layoutPositioning,"ABSOLUTE","Depth service must not participate in parent auto layout");
+    assert.deepEqual(copy.relativeTransform,autoLayoutCard.relativeTransform,"Depth service keeps the source position");
+  }
+  assert.equal(autoLayoutCard.x,originalCardX,"Depth services do not move the source in auto layout");
+  assert.equal(autoLayoutTail.x,originalTailX,"Depth services do not move later siblings in auto layout");
+  if(pass===0){
+    const oldCopy=nodes.get(services[0]);
+    oldCopy.layoutPositioning="AUTO";
+    assert.notEqual(autoLayoutTail.x,originalTailX,"Legacy in-flow services reproduce the layout shift");
+    const oldMarker=JSON.parse(autoLayoutCard.getPluginData("orbit-motion"));
+    oldMarker.centerOffset={x:0,y:0};
+    autoLayoutCard.setPluginData("orbit-motion",JSON.stringify(oldMarker));
+  }
+}
+await onMessage({type:"clear",scope:"selection"});
+parent.layoutMode="NONE";
 
 const invalidMessageStart=postedMessages.length;
 await onMessage({type:"apply",settings:{version:2,preset:"circle"}});

@@ -30,7 +30,7 @@ let checks=0;
 for(const id of presets){
   const initial=toMotionDocument(freshPreset(id));
   // Also exercise controls revealed when Row scaling is enabled.
-  const variants=initial.model==="rfCarousel"?[initial,{...initial,parameters:{...initial.parameters,scaleCenter:"on"}}]:[initial];
+  const variants:MotionDocument[]=initial.model==="rfCarousel"?[initial,{...initial,parameters:{...initial.parameters,scaleCenter:"on"}},...(["ellipse","custom-path","parametric","racetrack"] as const).map(shape=>({...initial,parameters:{...initial.parameters,shape,queue_customPath:"[[0,0.2],[0.4,0.9],[1,0.3]]"}}))]:[initial];
   for(const document of variants){
     const editor=motionEditor(document),baseline=trace(document);
     for(const binding of [...editor.quick,...editor.sections.flatMap(section=>section.bindings)]){

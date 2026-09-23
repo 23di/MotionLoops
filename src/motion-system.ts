@@ -1,5 +1,6 @@
 import type { ControlMeta, DialConfig } from "dialkit";
 import { cloneData } from "./clone-data";
+import { bloomPulse, migrateBloomSettings, pulseDefaults } from "./motion-modifiers";
 import type { DialTransition, MotionSettings, PresetId } from "./types";
 import { controls as compatibilityControls } from "./control-schema";
 import { referencePresets, referenceDefinition } from "./reference-catalog";
@@ -54,6 +55,11 @@ function set(settings:MotionSettings,path:string,value:unknown){
 const aliases:Record<string,[string,string,Section,number?]>={
   "motion.duration":["cycleDuration","Cycle duration (s)","motion"],
   "motion.stagger":["stagger","Stagger (s)","motion"],
+  "motion.radiusPulse":["radiusPulse","Radius pulse (%)","motion",100],
+  "motion.scalePulse":["scalePulse","Scale pulse (%)","motion",100],
+  "motion.opacityPulse":["opacityPulse","Opacity pulse (%)","motion",100],
+  "motion.depthPulse":["depthPulse","Depth pulse (%)","motion",100],
+  "geometry.pathScale":["pathScale","Path size (%)","trajectory",100],
   "motion.direction":["direction","Direction","motion"],
   "motion.fullCycle":["easing","Easing","motion"],
   "appearance.cardSize":["cardSize","Card size (%)","cards"],
@@ -103,7 +109,7 @@ function makeBinding(path:string,label?:string,section?:Section,override?:Partia
       transitionDuration:10,delay:5,stagger:2,cycles:4,cardSize:100,
       frontScale:200,backScale:100,spacing:50,spread:150,depth:100,
       perspective:200,zoom:200,turns:4,visible:6,
-      radiusX:100,radiusY:100,offsetX:100,offsetY:100,
+      radiusX:100,radiusY:100,offsetX:100,offsetY:100,pathScale:200,
     };
     config=[config[0],config[1],override?.max!==undefined?config[2]:caps[id]??Math.min(config[2],/angle|rotation|tilt|Phase|spin/i.test(id)?180:100),config[3]];
   }
@@ -130,6 +136,15 @@ function bindingsFor(model:string):Binding[]{
       section==="motion"?"motion":section==="appearance"||section==="style"?"cards":"trajectory",
       schema.overrides?.[path]),quick:schema.quickControls?.includes(path)});
   }
+  if(model==="rfCarousel"){
+    bindings.push({...makeBinding("geometry.shape"),path:"reference.pathShape",
+      config:{type:"select",default:"line",options:[{value:"line",label:"Line"},...(legacyConfig["geometry.shape"] as any).options]}});
+    for(const path of Object.keys(legacyConfig).filter(path=>path.startsWith("geometry.")&&path!=="geometry.shape")){
+      const binding=makeBinding(path);
+      // Row owns timing and card styling; keep its parameter names independent.
+      bindings.push({...binding,id:"queue_"+binding.id,quick:false});
+    }
+  }
   return bindings;
 }
 const models=["trajectory",...definitions.keys()];
@@ -148,6 +163,7 @@ function compatibilityBase():MotionSettings{
   return settings;
 }
 export function toMotionDocument(settings:MotionSettings):MotionDocument{
+  settings=migrateBloomSettings(settings);
   const definition=referenceDefinition(settings),model=definition?recipeKey(definition):"trajectory";
   const parameters:MotionDocument["parameters"]={};
   for(const binding of modelBindings(model)){
@@ -183,7 +199,9 @@ export function fromMotionDocument(document:MotionDocument):MotionSettings{
       (document.parameters.easing as {ease?:unknown}).ease:undefined;
     if(Array.isArray(ease))easePaths.forEach((key,index)=>settings.reference![key]=ease[index]);
   }
-  return settings;
+  if(document.model==="rfCarousel"&&settings.reference?.pathShape!=="line")
+    settings.geometry.shape=settings.reference!.pathShape as MotionSettings["geometry"]["shape"];
+  return migrateBloomSettings(settings);
 }
 export function documentValues(document:MotionDocument):Record<string,unknown>{
   return {version:2,preset:document.preset,model:document.model,
@@ -222,6 +240,8 @@ export function motionEditor(document:MotionDocument){
         : binding);
     // Expose only controls consumed by this shape in its current mode.
     const inactive=new Set<string>();
+    if(settings.geometry.depthAmplitude===0)
+      for(const id of ["depthWave","depthFrequency","depthPhase"])inactive.add(id);
     if(!settings.geometry.orient3d){
       inactive.add("tilt");
       if(!["ellipse","parametric"].includes(settings.geometry.shape))inactive.add("angle");
@@ -231,6 +251,12 @@ export function motionEditor(document:MotionDocument){
       for(const id of ["fadeStart","fadeEnd","opacityCurve","facePath"])inactive.add(id);
     visible=visible.filter(binding=>!inactive.has(binding.id));
   }else if(document.model==="rfCarousel"){
+    const settings=fromMotionDocument(document),paths=editorPaths(schemaForShape(settings));
+    const shape=document.parameters.shape??"line";
+    const unused=new Set(["units","dynamicScale","depth","tilt","rotation","orient3d","turns","depthWave","depthFrequency","depthAmplitude","depthPhase","depthFalloff"]);
+    visible=visible.filter(binding=>!binding.path.startsWith("geometry.") || shape!=="line"&&
+      !unused.has(binding.path.split(".")[1])&&
+      (paths.has(binding.path)||paths.has("geometry.advanced")&&/Wave|Frequency|Amplitude|Phase|yOffset/.test(binding.path)));
     visible=visible.filter(binding=>binding.id!=="cardTilt"&&
       (document.parameters.scaleCenter==="on"||!["scaleFocus","frontScale"].includes(binding.id)));
   }
@@ -255,11 +281,23 @@ export const motionControls={
 
 export function validateMotionDocument(input:unknown):MotionDocument{
   if(!input||typeof input!=="object")throw new Error("Invalid motion document.");
-  const document=input as MotionDocument;
+  const document=cloneData(input as MotionDocument);
   if(document.version!==2)throw new Error("Unsupported motion document version.");
-  if(!compatibilityControls.preset.options.some(option=>option.value===document.preset))throw new Error("Unsupported preset identity.");
+  if(document.preset!=="tile-wave"&&!compatibilityControls.preset.options.some(option=>option.value===document.preset))throw new Error("Unsupported preset identity.");
   if(!document.parameters||typeof document.parameters!=="object"||!document.other)throw new Error("Incomplete motion document.");
+  if(document.model==="trajectory"){
+    if(document.parameters.shape==="bloom"){
+      Object.assign(document.parameters,{shape:"parametric",radiusX:50,radiusY:40,pathScale:100,
+        depth:77.5,tilt:42,angle:-28,rotation:0,orient3d:true,yAmplitude:.65,depthAmplitude:1,
+        cardSize:30,frontScale:124,backScale:52,backOpacity:25});
+      for(const [key,value] of Object.entries(bloomPulse))document.parameters[key]=value*100;
+    }
+    for(const [key,value] of Object.entries(pulseDefaults))document.parameters[key]??=value;
+    document.parameters.pathScale??=100;
+  }
   const bindings=modelBindings(document.model);
+  if(document.model==="rfCarousel")for(const binding of bindings)
+    if(binding.id==="shape"||binding.id.startsWith("queue_"))document.parameters[binding.id]??=defaultOf(binding.config);
   for(const binding of bindings){
     const value=document.parameters[binding.id],config:any=binding.config;
     if(value===undefined)throw new Error("Missing parameter: "+binding.id);
