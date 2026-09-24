@@ -8,14 +8,15 @@ const select=(values:string[],value=values[0])=>({type:"select" as const,options
 // Product recipe data uses Orbit's own vocabulary. Imported renderer snapshots
 // remain an implementation detail for backwards-compatible saved documents.
 const productRecipeDefaults={
-  row:{motion:{travel:"right"},appearance:{edgeShade:50}},
+  row:{motion:{travel:"right"},appearance:{edgeShade:50,tiltStyle:"off"}},
 } as const;
 export const referenceControls = {
   ...motifControlConfig,
   _collapsed:true,
   planeSize:[100,1,200,1], cornerRadius:[0,0,50,.1],
   offsetX:[0,-100,100,.5],offsetY:[0,-100,100,.5],
-  zoom:[150,50,300,1],perspective:[50,0,1000,1],visible:[3,2,8,1],
+  zoom:[150,50,300,1],perspective:[50,0,1000,1],visible:[3,1,20,1],
+  exitFade:[0,0,100,1],
   duration:[2,.1,60,.05],delay:[0,0,5,.05],cycles:[1,.25,8,.25],stagger:[0,0,3,.001],
   direction:select(["down","up","left","right"]),
   gap:[4,0,200,.1],centerScale:[1.4,1,4,.05],scaleCenter:select(["off","on"]),scaleFocus:select(["left","center","right"],"right"),tiltStyle:select(["off","fan","uniform","alternate"]),tilt:[0,-100,100,1],solo:false,depthFade:[0,0,100,1],
@@ -29,8 +30,8 @@ export const referenceControls = {
 
 const shared=["planeSize","cornerRadius","easeX1","easeY1","easeX2","easeY2"];
 export const referenceControlKeys={
-  rfCarousel:[...shared,"gap","visible","offsetX","offsetY","direction","duration","delay","cycles","stagger","centerScale","scaleCenter","scaleFocus","tilt","solo","depthFade"],
-  rfStack:[...shared,"offsetX","offsetY","zoom","perspective","visible","direction","duration","delay","cycles","stagger"],
+  rfCarousel:[...shared,"gap","visible","offsetX","offsetY","direction","duration","delay","cycles","stagger","centerScale","scaleCenter","scaleFocus","tiltStyle","tilt","solo","depthFade"],
+  rfStack:[...shared,"offsetX","offsetY","zoom","perspective","visible","direction","duration","delay","cycles","stagger","exitFade"],
   rfFlicker:[...shared,"offsetX","offsetY","effect","pacing","scaleDir","driftDir","scaleAmount","driftAmount","duration","delay","cycles"],
   rfScale:[...shared,"duration","stagger","scaleStyle","growFrom","imageFit","spin"],
 };
@@ -51,13 +52,12 @@ export function referenceDefaults(id:string):Record<string,number|string|boolean
   // Translate the product recipe schema into renderer controls at the boundary.
   if(preset.mode==="rfCarousel"){
     defaults.direction=productRecipeDefaults.row.motion.travel;
+    defaults.tiltStyle=productRecipeDefaults.row.appearance.tiltStyle;
     defaults.scaleFocus=values.scaleFocus==="start"?"left":values.scaleFocus==="center"?"center":"right";
     defaults.visible=6;
     if(typeof values.depthFade==="number")defaults.depthFade=productRecipeDefaults.row.appearance.edgeShade;
-    if(id==="reference-carousel-05"||id==="reference-carousel-06"){
-      defaults.scaleCenter="on";defaults.scaleFocus="center";defaults.centerScale=1.6;defaults.depthFade=25;
-    }
   }
+  if("productSettings" in preset)Object.assign(defaults,preset.productSettings);
   // Source corner radius is in a 1080-high reference canvas. Store percentages.
   defaults.cornerRadius=Number(values.cornerRadius??0)/1080*100;
   if(preset.mode==="rfCarousel")for(const key of ["planeSize","gap"])defaults[key]=Number(values[key]??0)/1080*100;
@@ -76,5 +76,5 @@ export function referenceEditor(id:string):EditorSchema{
   const paths=(items:string[])=>items.filter(key=>keys.includes(key)).map(key=>`reference.${key}`);
   const other=["other.scope","other.copyJson","other.pasteJson","other.resetSettings"];
   const sections=[{id:"motion",title:"Motion",paths:["motion.duration",...paths(timing)]},{id:"geometry",title:"Geometry",paths:paths(geometry)},{id:"style",title:"Style",paths:paths(keys.filter(key=>![...timing,...geometry,...easing].includes(key)))},{id:"easing",title:"Easing",paths:paths(easing)},{id:"other",title:"Other",paths:other}].filter(section=>section.paths.length>0);
-  return {geometry:[],pathEditor:false,quickDirection:false,sections,quickControls:quick.map(key=>`reference.${key}`),controls:[...sections.flatMap(section=>section.paths)],overrides:{"motion.duration":{min:.1,max:120,step:.1},"reference.direction":{options:mode==="rfStack"?["down","up"]:["up","down","left","right"]},...(mode==="rfCarousel"?{"reference.visible":{min:1,max:20,step:1}}:{})},labels:{"motion.duration":"Cycle duration","reference.duration":"Transition duration","reference.scaleFocus":"Scale focus","reference.visible":"Visible cards","reference.planeSize":"Card size (%)","reference.gap":"Gap (%)","reference.cornerRadius":"Corner radius (%)","reference.offsetX":"Offset X (%)","reference.offsetY":"Offset Y (%)","reference.zoom":"Zoom (%)","reference.scaleAmount":"Scale amount (%)","reference.driftAmount":"Drift amount (%)","reference.depthFade":"Depth fade (%)"}};
+  return {geometry:[],pathEditor:false,quickDirection:false,sections,quickControls:quick.map(key=>`reference.${key}`),controls:[...sections.flatMap(section=>section.paths)],overrides:{"motion.duration":{min:.1,max:120,step:.1},"reference.direction":{options:mode==="rfStack"?["down","up"]:["up","down","left","right"]},...(mode==="rfCarousel"?{"reference.visible":{min:1,max:20,step:1}}:{})},labels:{"motion.duration":"Cycle duration","reference.duration":"Transition duration","reference.scaleFocus":"Scale focus","reference.visible":"Visible cards","reference.planeSize":"Card size (%)","reference.gap":"Gap (%)","reference.cornerRadius":"Corner radius (%)","reference.offsetX":"Offset X (%)","reference.offsetY":"Offset Y (%)","reference.zoom":"Zoom (%)","reference.scaleAmount":"Scale amount (%)","reference.driftAmount":"Drift amount (%)","reference.depthFade":"Depth fade (%)","reference.exitFade":"Exit fade (%)"}};
 }

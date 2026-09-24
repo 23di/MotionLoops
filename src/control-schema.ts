@@ -19,6 +19,9 @@ export const controls = {
     scalePulse: [0, 0, 1, 0.01],
     opacityPulse: [0, 0, 1, 0.01],
     depthPulse: [0, 0, 1, 0.01],
+    queue: false,
+    queueStep: [1, .05, 1, .01],
+    queueEasing: {type:"easing",duration:1,ease:[.86,.14,.14,.86]},
     direction: {
       type: "select",
       options: [
@@ -43,6 +46,7 @@ export const controls = {
     shape: {
       type: "select",
       options: [
+        { value: "line", label: "Line" },
         { value: "ellipse", label: "Ellipse" },
         { value: "crosscurrent", label: "Crosscurrent" },
         { value: "tile-wave", label: "Tile Wave" },
@@ -69,6 +73,8 @@ export const controls = {
     dynamicScale: true,
     radiusX: [50, 0, 100, 1],
     radiusY: [40, 0, 100, 1],
+    offsetX: [0, -100, 100, 1],
+    offsetY: [0, -100, 100, 1],
     pathScale: [1, 0, 2, 0.01],
     circleRotation: [0, -180, 180, 1],
     depth: [65, 0, 200, 1],
@@ -109,6 +115,8 @@ export const controls = {
     },
   },
   appearance: {
+    sizeBasis: {type:"select",options:["standard","row"],default:"standard"},
+    adaptiveSize: true,
     cardSize: [58, 0, 100, 1],
     _collapsed: true,
     nearScale: [1.25, 0.1, 3, 0.05],

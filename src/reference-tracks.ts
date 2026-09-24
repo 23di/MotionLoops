@@ -3,6 +3,7 @@ import type { GeneratedKeyframe } from "./engine";
 import type { MotionSettings } from "./types";
 import { referenceDefinition } from "./reference-catalog";
 import { recipeKey } from "./preset-presentation";
+import {maxNativeServiceCopies} from "./motion-capabilities";
 
 export interface NativeFrame extends GeneratedKeyframe { radius: number; shade: number; alpha:number; imageScaleX:number; imageScaleY:number }
 export interface NativeInstance { source: number; layer: number; fill: boolean; baseWidth: number; baseHeight: number; frames: NativeFrame[] }
@@ -71,7 +72,7 @@ export function compileReference(settings: MotionSettings,sources:readonly Sourc
   }
   const keys=new Map<string,ReturnType<typeof scene>[number]>();
   for(const snapshot of scenes)for(const [key,card] of snapshot)keys.set(key,card);
-  if(keys.size>256)throw new Error("This combination needs more than 256 editable service copies. Reduce the card count or visible cards.");
+  if(keys.size>maxNativeServiceCopies)throw new Error(`This combination needs more than ${maxNativeServiceCopies} editable service copies. Reduce the card count or visible cards.`);
   return [...keys].map(([key,initial])=>{
     const baseWidth=initial.fill?100:sources[initial.source].width,baseHeight=initial.fill?100*initial.height/initial.width:sources[initial.source].height;
     let last=initial;

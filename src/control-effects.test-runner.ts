@@ -1,10 +1,12 @@
 // @ts-ignore Test runner bundles Node builtins.
 import assert from "node:assert/strict";
-import {families,freshPreset,settingsFromSaved} from "./catalog";
-import {activeReferencePresets} from "./reference-catalog";
+import {freshPreset,settingsFromSaved} from "./catalog";
+import {referencePresets} from "./reference-catalog";
+import {presetOptions} from "./types";
 import {toMotionDocument,fromMotionDocument,motionEditor,validateMotionDocument,modelBindings,type MotionDocument} from "./motion-system";
 import {referenceScene} from "./reference-engine";
 import {fitSettingsToFrame,generateNodeKeyframes} from "./engine";
+import {cardBaseSize} from "./card-presentation";
 
 assert.equal(typeof globalThis.structuredClone,"undefined","Exercise Figma's missing browser API");
 const original=toMotionDocument(freshPreset("racetrack"));
@@ -20,13 +22,16 @@ assert.equal(fallback.geometry.radiusX,60,"Restoring settings must not mutate de
 const sources=Array.from({length:9},(_,i)=>({width:100+i*13,height:180-i*5}));
 function trace(document:MotionDocument):string {
   const settings=fromMotionDocument(document);
-  if(document.model!=="trajectory")return JSON.stringify([.137,.67,1.23,2.91,4.1].map(time=>referenceScene(settings,sources,720,400,time)));
+  if(document.model!=="trajectory")return JSON.stringify([.137,.67,1.23,2.91,4.1,
+    ...Array.from({length:15},(_,i)=>(i+.37)/15*settings.motion.duration)]
+    .map(time=>referenceScene(settings,sources,720,400,time)));
   return JSON.stringify(sources.slice(0,3).map((size,index)=>generateNodeKeyframes(
     fitSettingsToFrame(settings,720,400,size.width,size.height,sources.length),index,sources.length,
   )));
 }
-const presets=[...activeReferencePresets.map(p=>p.id),...families.flatMap(f=>f.variants.map(v=>v.id))];
+const presets=[...referencePresets.map(p=>p.id),...presetOptions.map(p=>p.value)];
 let checks=0;
+const ineffective:string[]=[];
 for(const id of presets){
   const initial=toMotionDocument(freshPreset(id));
   // Also exercise controls revealed when Row scaling is enabled.
@@ -49,12 +54,21 @@ for(const id of presets){
       // with an oversized path so its constraint is actually active.
       const constrainedFit=binding.id==="fit"&&trace({...document,parameters:{...document.parameters,radiusX:100,radiusY:100,fit:true}})!==
         trace({...document,parameters:{...document.parameters,radiusX:100,radiusY:100,fit:false}});
-      assert(changesOutput||constrainedFit,
-        `${id}/${document.parameters.shape}: visible control ${binding.id} has no animation effect`);
+      const constrainedAdaptive=["adaptiveSize","shape_adaptiveSize"].includes(binding.id)&&(()=>{
+        const enabled=fromMotionDocument({...document,parameters:{...document.parameters,[binding.id]:true}});
+        const disabled=fromMotionDocument({...document,parameters:{...document.parameters,[binding.id]:false}});
+        return cardBaseSize(enabled,720,400,400,100).width!==cardBaseSize(disabled,720,400,400,100).width;
+      })();
+      const pairedTilt=binding.id==="tiltStyle"&&trace({...document,parameters:{...document.parameters,cardTilt:25,tiltStyle:"alternate"}})!==
+        trace({...document,parameters:{...document.parameters,cardTilt:25,tiltStyle:"off"}})||
+        binding.id==="cardTilt"&&trace({...document,parameters:{...document.parameters,cardTilt:25,tiltStyle:"alternate"}})!==
+        trace({...document,parameters:{...document.parameters,cardTilt:0,tiltStyle:"alternate"}});
+      if(!changesOutput&&!constrainedFit&&!constrainedAdaptive&&!pairedTilt)ineffective.push(`${id}/${document.parameters.shape}: ${binding.id}`);
       checks++;
     }
   }
 }
+assert.equal(ineffective.length,0,`Visible controls without animation effect:\n${ineffective.join("\n")}`);
 const row=toMotionDocument(freshPreset("reference-carousel-11"));
 const ripple=toMotionDocument(freshPreset("tile-wave"));
 assert(motionEditor(ripple).quick.some(binding=>binding.id==="spread"&&binding.label==="Gap (%)"));

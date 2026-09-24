@@ -1,4 +1,6 @@
-import type { MotionSettings } from "./types";
+import type { DialTransition, MotionSettings } from "./types";
+
+export const defaultQueueEasing: DialTransition = {type:"easing",duration:1,ease:[.86,.14,.14,.86]};
 
 export const pulseDefaults = { radiusPulse: 0, scalePulse: 0, opacityPulse: 0, depthPulse: 0 };
 export const bloomPulse = { radiusPulse: 0.92, scalePulse: 0, opacityPulse: 0, depthPulse: 0 };
@@ -12,8 +14,9 @@ export function migrateBloomSettings(settings: MotionSettings): MotionSettings {
   const oldShape=String(settings.geometry.shape)==="bloom";
   const oldRecipe=settings.motion.radiusPulse===.92&&settings.motion.scalePulse===.42&&
     settings.motion.opacityPulse===.3&&settings.motion.depthPulse===.35;
+  const oldBloomGeometry=settings.geometry.shape==="ellipse"&&settings.geometry.depthAmplitude===0;
   if(!oldShape&&!oldRecipe)return settings;
-  if(settings.preset==="bloom"||oldShape)return {...settings,
+  if(oldShape||oldRecipe&&oldBloomGeometry)return {...settings,
     motion:{...settings.motion,...bloomPulse},
     geometry:{...settings.geometry,...orbitOneGeometry,radiusX:50,radiusY:40,pathScale:1,depthAmplitude:1},
     appearance:{...settings.appearance,...orbitOneAppearance}};

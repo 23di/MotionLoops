@@ -2,6 +2,17 @@
 // Only entries with an implemented native renderer belong in this registry.
 import { motifPresets } from "./motif-catalog";
 import { recipeKey, recipePresentation, retiredGalleryPresets, rowGalleryGroups } from "./preset-presentation";
+import type { MotionSettings } from "./types";
+
+// A model's starting primitives are data; individual presets only tune values.
+export const referenceModelCompositions:Record<string,{
+  motion?:Partial<MotionSettings["motion"]>;
+  geometry?:Partial<MotionSettings["geometry"]>;
+  appearance?:Partial<MotionSettings["appearance"]>;
+}>={
+  rfCarousel:{motion:{queue:true},geometry:{shape:"line"},appearance:{cardSize:0,sizeBasis:"row",nearScale:1,farScale:1,farOpacity:1}},
+  rfStack:{motion:{queue:true},geometry:{shape:"line",circleRotation:90}},
+};
 const seriesPresets = [
   {
     "id": "reference-carousel-01",
@@ -112,6 +123,7 @@ const seriesPresets = [
     "duration": 18,
     "minSlots": 2,
     "maxSlots": 20,
+    "productSettings": {"scaleCenter":"on","scaleFocus":"center","centerScale":1.6,"depthFade":25},
     "values": {
       "gap": 80,
       "delay": 0,
@@ -137,6 +149,7 @@ const seriesPresets = [
     "duration": 18,
     "minSlots": 2,
     "maxSlots": 20,
+    "productSettings": {"scaleCenter":"on","scaleFocus":"center","centerScale":1.6,"depthFade":25},
     "values": {
       "gap": 80,
       "delay": 0,

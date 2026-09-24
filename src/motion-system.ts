@@ -1,12 +1,13 @@
 import type { ControlMeta, DialConfig } from "dialkit";
 import { cloneData } from "./clone-data";
-import { bloomPulse, migrateBloomSettings, pulseDefaults } from "./motion-modifiers";
+import { bloomPulse, defaultQueueEasing, migrateBloomSettings, pulseDefaults } from "./motion-modifiers";
 import type { DialTransition, MotionSettings, PresetId } from "./types";
 import { controls as compatibilityControls } from "./control-schema";
 import { referencePresets, referenceDefinition } from "./reference-catalog";
 import { referenceDefaults, referenceEditor } from "./reference-controls";
 import { schemaForShape, editorPaths } from "./editor-schema";
-import { recipeKey } from "./preset-presentation";
+import { recipeKey, recipePresentation } from "./preset-presentation";
+import { editableVisibleMax } from "./motion-capabilities";
 
 export type ParameterValue = number | string | boolean | DialTransition;
 /** The only persisted/editor-facing settings format. Evaluators use adapters below. */
@@ -59,10 +60,13 @@ const aliases:Record<string,[string,string,Section,number?]>={
   "motion.scalePulse":["scalePulse","Scale pulse (%)","motion",100],
   "motion.opacityPulse":["opacityPulse","Opacity pulse (%)","motion",100],
   "motion.depthPulse":["depthPulse","Depth pulse (%)","motion",100],
+  "motion.queueStep":["queueStep","Queue transition (%)","motion",100],
+  "motion.queueEasing":["queueEasing","Queue easing","motion"],
   "geometry.pathScale":["pathScale","Path size (%)","trajectory",100],
   "motion.direction":["direction","Direction","motion"],
   "motion.fullCycle":["easing","Easing","motion"],
   "appearance.cardSize":["cardSize","Card size (%)","cards"],
+  "appearance.adaptiveSize":["adaptiveSize","Adaptive card size","cards"],
   "appearance.nearScale":["frontScale","Front scale (%)","cards",100],
   "appearance.farScale":["backScale","Back scale (%)","cards",100],
   "appearance.farOpacity":["backOpacity","Back opacity (%)","cards",100],
@@ -83,6 +87,8 @@ const aliases:Record<string,[string,string,Section,number?]>={
   "reference.imageFit":["imageFit","Image fit","cards"],
   "geometry.radiusX":["radiusX","Horizontal radius (%)","trajectory"],
   "geometry.radiusY":["radiusY","Vertical radius (%)","trajectory"],
+  "geometry.offsetX":["offsetX","Offset X (%)","trajectory"],
+  "geometry.offsetY":["offsetY","Offset Y (%)","trajectory"],
   "geometry.circleRotation":["angle","Angle (°)","trajectory"],
   "geometry.tilt":["tilt","Tilt (°)","trajectory"],
   "geometry.depth":["depth","Depth (%)","trajectory"],
@@ -119,6 +125,16 @@ function makeBinding(path:string,label?:string,section?:Section,override?:Partia
 }
 const easePaths=["easeX1","easeY1","easeX2","easeY2"];
 const definitions=new Map(referencePresets.map(p=>[recipeKey(p),p]));
+function queueAppearanceBindings():Binding[]{
+  return Object.keys(legacyConfig).filter(path=>path.startsWith("appearance.")).map(path=>{
+    const binding=makeBinding(path);
+    const neutral=path==="appearance.cardSize"?0:
+      ["appearance.nearScale","appearance.farScale","appearance.farOpacity"].includes(path)?100:undefined;
+    const config=path==="appearance.sizeBasis"?{...(binding.config as object),default:"row"}:
+      neutral!==undefined&&Array.isArray(binding.config)?[neutral,...binding.config.slice(1)]:binding.config;
+    return {...binding,id:"shape_"+binding.id,config,quick:false};
+  });
+}
 /** Model capabilities, not preset-specific UI. */
 function bindingsFor(model:string):Binding[]{
   if(model==="trajectory")return Object.keys(legacyConfig)
@@ -127,32 +143,80 @@ function bindingsFor(model:string):Binding[]{
   const definition=definitions.get(model);
   if(!definition)throw new Error("Unsupported motion model: "+model);
   const schema=referenceEditor(definition.id);
-  const bindings=[makeBinding("motion.duration"),...("params" in definition?[]:[makeBinding("motion.fullCycle")])];
+  const bindings=[makeBinding("motion.duration"),...("params" in definition?[]:[model==="rfCarousel"
+    ? {...makeBinding("motion.queueEasing"),id:"easing",label:"Easing"}
+    : makeBinding("motion.fullCycle")])];
+  if(model==="rfCarousel")bindings.push({...makeBinding("motion.queue"),id:"queueAnimation",config:true},makeBinding("motion.queueStep"),
+    ...["radiusPulse","scalePulse","opacityPulse","depthPulse"].map(key=>makeBinding("motion."+key)));
+  if(model==="rfStack")bindings.push({...makeBinding("motion.queue"),id:"queueAnimation",config:true});
   for(const [id] of Object.entries(referenceDefaults(definition.id))){
     if(easePaths.includes(id))continue;
     const path="reference."+id;
     const section=schema.sections?.find(section=>section.paths.includes(path))?.id;
-    bindings.push({...makeBinding(path,schema.labels?.[path],
+    const binding={...makeBinding(path,schema.labels?.[path],
       section==="motion"?"motion":section==="appearance"||section==="style"?"cards":"trajectory",
-      schema.overrides?.[path]),quick:schema.quickControls?.includes(path)});
+      schema.overrides?.[path]),quick:schema.quickControls?.includes(path)};
+    bindings.push(binding);
+    if(model==="rfStack"&&id==="planeSize")
+      bindings.splice(bindings.length-1,0,makeBinding("appearance.adaptiveSize",undefined,binding.section));
   }
   if(model==="rfCarousel"){
-    bindings.push({...makeBinding("geometry.shape"),path:"reference.pathShape",
-      config:{type:"select",default:"line",options:[{value:"line",label:"Line"},...(legacyConfig["geometry.shape"] as any).options]}});
+    const shape=makeBinding("geometry.shape");
+    bindings.push({...shape,config:{...(shape.config as object),default:"line"}});
     for(const path of Object.keys(legacyConfig).filter(path=>path.startsWith("geometry.")&&path!=="geometry.shape")){
       const binding=makeBinding(path);
-      // Row owns timing and card styling; keep its parameter names independent.
+      // Preserve the reference model's existing geometry parameter names.
       bindings.push({...binding,id:"queue_"+binding.id,quick:false});
+    }
+    bindings.push(...queueAppearanceBindings());
+  }
+  if(model==="rfStack"){
+    for(const path of ["geometry.shape","geometry.radiusX","geometry.radiusY","geometry.circleRotation","geometry.customPath"]){
+      const binding=makeBinding(path);
+      bindings.push(path==="geometry.shape"?{...binding,config:{...(binding.config as object),default:"line"}}:
+        path==="geometry.circleRotation"?{...binding,config:[90,-180,180,1]}:binding);
     }
   }
   return bindings;
 }
 const models=["trajectory",...definitions.keys()];
 const registry=new Map(models.map(model=>[model,bindingsFor(model)]));
+export const motionModelOptions=models.map(model=>({value:model,
+  label:model==="trajectory"?"Trajectory":recipePresentation[model]?.name??model}));
 export function modelBindings(model:string):readonly Binding[]{
   const bindings=registry.get(model);
   if(!bindings)throw new Error("Unsupported motion model: "+model);
   return bindings;
+}
+/** Change the algorithm primitive while retaining every compatible setting. */
+export function switchMotionModel(settings:MotionSettings,model:string,sourceCount?:number):MotionSettings{
+  if(!registry.has(model))throw new Error("Unsupported motion model: "+model);
+  const current=referenceDefinition(settings),currentModel=current?recipeKey(current):"trajectory";
+  if(model===currentModel)return settings;
+  const switched=cloneData(settings);
+  switched.renderer=model==="trajectory"?"legacy":model;
+  if(model==="trajectory"){
+    delete switched.reference;
+    return switched;
+  }
+  const definition=definitions.get(model)!;
+  const reference=referenceDefaults(definition.id);
+  for(const binding of modelBindings(model)){
+    if(!binding.path.startsWith("reference."))continue;
+    const key=binding.path.slice("reference.".length);
+    const value=settings.reference?.[key],config=binding.config as any;
+    if(value===undefined||!(key in reference))continue;
+    if(Array.isArray(config)&&typeof value==="number"&&
+      (!Number.isFinite(value)||value<Number(config[1])))continue;
+    if(config?.type==="select"&&!config.options.some((option:any)=>
+      (typeof option==="string"?option:option.value)===value))continue;
+    if(typeof value===typeof reference[key])reference[key]=value;
+  }
+  switched.reference=reference;
+  if(["rfStack","rfCarousel"].includes(model)&&sourceCount!==undefined)
+    switched.reference.visible=Math.min(Number(switched.reference.visible),
+      editableVisibleMax(sourceCount));
+  return switched;
 }
 function compatibilityBase():MotionSettings{
   const settings={preset:"circle",renderer:"legacy",motion:{keyframes:32},geometry:{},appearance:{},other:{}} as MotionSettings;
@@ -165,6 +229,10 @@ function compatibilityBase():MotionSettings{
 export function toMotionDocument(settings:MotionSettings):MotionDocument{
   settings=migrateBloomSettings(settings);
   const definition=referenceDefinition(settings),model=definition?recipeKey(definition):"trajectory";
+  if(model==="rfCarousel"&&!settings.motion.queueEasing&&settings.reference&&
+    easePaths.every(key=>typeof settings.reference![key]==="number"))
+    settings={...settings,motion:{...settings.motion,queueEasing:{type:"easing",duration:1,
+      ease:easePaths.map(key=>settings.reference![key]) as [number,number,number,number]}}};
   const parameters:MotionDocument["parameters"]={};
   for(const binding of modelBindings(model)){
     let value=get(settings,binding.path);
@@ -177,7 +245,7 @@ export function toMotionDocument(settings:MotionSettings):MotionDocument{
     };
     if(value!==undefined)parameters[binding.id]=value;
   }
-  if(model!=="trajectory"&&settings.reference&&easePaths.every(key=>typeof settings.reference![key]==="number")){
+  if(model!=="trajectory"&&model!=="rfCarousel"&&settings.reference&&easePaths.every(key=>typeof settings.reference![key]==="number")){
     parameters.easing={type:"easing",duration:1,ease:easePaths.map(key=>settings.reference![key]) as [number,number,number,number]};
   }
   return {version:2,preset:settings.preset,model,parameters,other:{...settings.other}};
@@ -199,8 +267,6 @@ export function fromMotionDocument(document:MotionDocument):MotionSettings{
       (document.parameters.easing as {ease?:unknown}).ease:undefined;
     if(Array.isArray(ease))easePaths.forEach((key,index)=>settings.reference![key]=ease[index]);
   }
-  if(document.model==="rfCarousel"&&settings.reference?.pathShape!=="line")
-    settings.geometry.shape=settings.reference!.pathShape as MotionSettings["geometry"]["shape"];
   return migrateBloomSettings(settings);
 }
 export function documentValues(document:MotionDocument):Record<string,unknown>{
@@ -215,6 +281,8 @@ export function documentFromValues(values:Record<string,unknown>):MotionDocument
     const value=values["parameters."+binding.id]??defaultOf(binding.config);
     if(value!==undefined)parameters[binding.id]=value as ParameterValue;
   }
+  if(model==="trajectory"&&values["parameters.queueEasing"]===undefined&&parameters.queueStep===68)
+    parameters.queueStep=100;
   const other={...compatibilityBase().other};
   for(const key of Object.keys(other))if(values["other."+key]!==undefined)(other as any)[key]=values["other."+key];
   return {version:2,preset:(values.preset??"circle") as PresetId,model,parameters,other};
@@ -224,12 +292,14 @@ export function legacyParameterId(model:string,path:string):string|undefined{
 }
 export function motionEditor(document:MotionDocument){
   const bindings=modelBindings(document.model);
-  let visible=bindings;
+  let visible:Binding[]=[...bindings];
   let pathEditor=false;
   if(document.model==="trajectory"){
     const settings=fromMotionDocument(document),schema=schemaForShape(settings),paths=editorPaths(schema);
-    pathEditor=!!schema.pathEditor;
+    pathEditor=true;
     visible=bindings.filter(binding=>!binding.path.includes("keyframes")&&binding.path!=="geometry.units"&&
+      binding.id!=="sizeBasis"&&binding.id!=="queue"&&
+      (settings.motion.queue||!['queueStep','queueEasing'].includes(binding.id))&&
       (paths.has(binding.path)||paths.has(binding.path.split(".")[0])||binding.path==="motion.direction"||
        paths.has("geometry.advanced")&&/Wave|Frequency|Amplitude|Phase|yOffset/.test(binding.path)));
     const quickPaths=new Set(["motion.direction",...(schema.quick??[])]);
@@ -247,18 +317,45 @@ export function motionEditor(document:MotionDocument){
       if(!["ellipse","parametric"].includes(settings.geometry.shape))inactive.add("angle");
     }
     if(settings.geometry.shape==="vortex")inactive.add("depthFalloff");
+    if(["deck","falling-stack"].includes(settings.geometry.shape))inactive.add("facePath");
     if(["crosscurrent","tile-wave"].includes(settings.geometry.shape))
       for(const id of ["fadeStart","fadeEnd","opacityCurve","facePath"])inactive.add(id);
     visible=visible.filter(binding=>!inactive.has(binding.id));
   }else if(document.model==="rfCarousel"){
     const settings=fromMotionDocument(document),paths=editorPaths(schemaForShape(settings));
+    pathEditor=true;
     const shape=document.parameters.shape??"line";
-    const unused=new Set(["units","dynamicScale","depth","tilt","rotation","orient3d","turns","depthWave","depthFrequency","depthAmplitude","depthPhase","depthFalloff"]);
-    visible=visible.filter(binding=>!binding.path.startsWith("geometry.") || shape!=="line"&&
+    const rowSize=settings.appearance.sizeBasis==="row";
+    const unused=new Set(["units","dynamicScale","offsetX","offsetY","depth","tilt","rotation","orient3d","turns","depthWave","depthFrequency","depthAmplitude","depthPhase","depthFalloff"]);
+    visible=visible.filter(binding=>binding.id!=="queueAnimation"&&binding.id!=="queueStep"&&binding.id!=="shape_sizeBasis"&&
+      (!settings.motion.queue||!binding.id.endsWith("Pulse"))&&
+      (settings.motion.queue||!["transitionDuration","delay","stagger"].includes(binding.id))&&
+      (rowSize?binding.id!=="shape_cardSize":binding.id!=="cardSize")&&
+      (!binding.id.startsWith("shape_")||["shape_cardSize","shape_adaptiveSize"].includes(binding.id))&&
+      (!binding.path.startsWith("geometry.") || shape!=="line"&&
       !unused.has(binding.path.split(".")[1])&&
-      (paths.has(binding.path)||paths.has("geometry.advanced")&&/Wave|Frequency|Amplitude|Phase|yOffset/.test(binding.path)));
-    visible=visible.filter(binding=>binding.id!=="cardTilt"&&
+      (paths.has(binding.path)||paths.has("geometry.advanced")&&/Wave|Frequency|Amplitude|Phase|yOffset/.test(binding.path))));
+    visible=visible.filter(binding=>
       (document.parameters.scaleCenter==="on"||!["scaleFocus","frontScale"].includes(binding.id)));
+    if(document.parameters.solo===true)visible=visible.filter(binding=>
+      !["depthFade","tiltStyle","cardTilt"].includes(binding.id));
+    const adaptiveIndex=visible.findIndex(binding=>binding.id==="shape_adaptiveSize");
+    const sizeIndex=visible.findIndex(binding=>binding.id===(rowSize?"cardSize":"shape_cardSize"));
+    if(adaptiveIndex>=0&&sizeIndex>=0){
+      const [adaptive]=visible.splice(adaptiveIndex,1);
+      visible.splice(visible.findIndex(binding=>binding.id===(rowSize?"cardSize":"shape_cardSize")),0,adaptive);
+    }
+  }else if(document.model==="rfStack"){
+    pathEditor=true;
+    visible=visible.filter(binding=>binding.id!=="queueAnimation"&&
+      (document.parameters.shape!=="line"||!["radiusY","customPath"].includes(binding.id))&&
+      (document.parameters.shape==="custom-path"||binding.id!=="customPath"));
+  }else if(document.model==="rfFlicker"){
+    const effect=document.parameters.effect;
+    visible=visible.filter(binding=>
+      (effect!=="off"||!["easing","transitionDuration","delay","scaleDir","driftDir","scaleAmount","driftAmount"].includes(binding.id))&&
+      (effect==="scale"||!["scaleDir","scaleAmount"].includes(binding.id))&&
+      (effect==="drift"||!["driftDir","driftAmount"].includes(binding.id)));
   }
   const quick=visible.filter(binding=>binding.quick);
   return {quick,pathEditor,sections:motionSections.map(section=>({...section,
@@ -294,10 +391,27 @@ export function validateMotionDocument(input:unknown):MotionDocument{
     }
     for(const [key,value] of Object.entries(pulseDefaults))document.parameters[key]??=value;
     document.parameters.pathScale??=100;
+    document.parameters.offsetX??=0;
+    document.parameters.offsetY??=0;
+    document.parameters.sizeBasis??="standard";
+    document.parameters.adaptiveSize??=true;
+    document.parameters.queue??=false;
+    if(document.parameters.queueEasing===undefined && document.parameters.queueStep===68)
+      document.parameters.queueStep=100;
+    document.parameters.queueStep??=100;
+    document.parameters.queueEasing??={...defaultQueueEasing};
   }
   const bindings=modelBindings(document.model);
   if(document.model==="rfCarousel")for(const binding of bindings)
-    if(binding.id==="shape"||binding.id.startsWith("queue_"))document.parameters[binding.id]??=defaultOf(binding.config);
+    if(binding.id==="queueAnimation"||binding.id==="queueStep"||binding.id==="tiltStyle"||binding.id==="shape"||binding.id.startsWith("queue_")||binding.id.startsWith("shape_")||
+      binding.path.startsWith("motion.")&&binding.id.endsWith("Pulse"))document.parameters[binding.id]??=defaultOf(binding.config);
+  if(document.model==="rfStack")document.parameters.adaptiveSize??=true;
+  if(document.model==="rfStack"){
+    document.parameters.queueAnimation??=true;
+    document.parameters.shape??="line";
+    document.parameters.angle??=90;
+    document.parameters.exitFade??=0;
+  }
   for(const binding of bindings){
     const value=document.parameters[binding.id],config:any=binding.config;
     if(value===undefined)throw new Error("Missing parameter: "+binding.id);

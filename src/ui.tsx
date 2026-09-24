@@ -15,8 +15,9 @@ import {
 } from "./engine";
 import { families, freshPreset, familyFor, motionFingerprint, settingsFromSaved } from "./catalog";
 import { PresetEditor } from "./preset-editor";
-import { referenceDefinition, activeReferencePresets } from "./reference-catalog";
+import { referenceDefinition, referencePreset, activeReferencePresets } from "./reference-catalog";
 import { referenceScene } from "./reference-engine";
+import { recipeKey, recipePresentation } from "./preset-presentation";
 import { migrateSettingsToPercent, parseSettingsJson, serializeSettingsJson } from "./settings-json";
 import {
   presetOptions,
@@ -298,7 +299,9 @@ function GeometryPathEditor({ settings, target }: { settings: MotionSettings; ta
   const rawRadiusX = fitted.geometry.radiusX / frameWidth * viewWidth;
   const rawRadiusY = fitted.geometry.radiusY / frameHeight * viewHeight;
   const circleRotation = settings.geometry.circleRotation ?? 0;
-  const orbitOrientation = supportsOrbitOrientation(settings.geometry) && settings.geometry.shape !== "custom-path";
+  const stackPreview = referenceDefinition(settings)?.mode === "rfStack";
+  const orbitOrientation = !stackPreview && supportsOrbitOrientation(settings.geometry) && settings.geometry.shape !== "custom-path";
+  const lineHandles = !stackPreview && settings.geometry.shape === "line";
   // The editable ellipse is the projected base shape, independent of pulse,
   // depth waves and the number of turns in its animation.
   const ellipseTiltScale = orbitOrientation && settings.geometry.shape === "ellipse"
@@ -309,18 +312,30 @@ function GeometryPathEditor({ settings, target }: { settings: MotionSettings; ta
   const ellipseBoundsY = Math.hypot(rawRadiusX * Math.sin(projectionAngle), rawProjectedY * Math.cos(projectionAngle));
   // Reserve room for both the side rotation handle and the tilt guide.
   // This is a camera scale only; the animation's dimensions stay unchanged.
-  const editorScale = settings.geometry.shape === "ellipse" ? Math.min(1,
+  const editorScale = (settings.geometry.shape === "ellipse" || lineHandles) ? Math.min(1,
     Math.max(1, viewWidth / 2 - 40) / Math.max(1, ellipseBoundsX),
     Math.max(1, viewHeight / 2 - 30) / Math.max(1, ellipseBoundsY),
   ) : 1;
   const radiusX = rawRadiusX * editorScale;
   const radiusY = rawRadiusY * editorScale;
   const projectedRadiusY = radiusY * Math.abs(ellipseTiltScale);
-  const renderOrbitPreview = !supportsPathGeometry(settings.geometry.shape);
-  const orbitPathCount = settings.geometry.shape === "sphere"
-    ? Math.min(Math.max(target.count || 9, 2), 24)
-    : 1;
-  const orbitPreviewPaths = renderOrbitPreview
+  const renderOrbitPreview = stackPreview || !supportsPathGeometry(settings.geometry.shape);
+  const distributedShapes = new Set(["sphere", "deck", "shuffle", "falling-stack", "focus-deck", "fan", "crosscurrent", "tile-wave"]);
+  const orbitPathCount = distributedShapes.has(settings.geometry.shape)
+    ? Math.min(Math.max(target.count || 9, 2), 9) : 1;
+  const stackPreviewSources=Array.from({length:Math.min(Math.max(target.count,2),20)},(_,index)=>target.items[index]??
+    {width:80,height:100,offsetX:0,offsetY:0});
+  const stackPreviewStep=settings.motion.duration/
+    Math.max(stackPreviewSources.length*Number(settings.reference?.cycles??1),.01);
+  const stackPreviewScenes=stackPreview?Array.from({length:49},(_,sample)=>
+    referenceScene(settings,stackPreviewSources,frameWidth,frameHeight,
+      sample/48*Math.max(stackPreviewStep,.01))):[];
+  const orbitPreviewPoints = stackPreview
+    ? Array.from({length:Math.min(20,Math.round(Number(settings.reference?.visible??3)))},(_,index)=>
+      stackPreviewScenes.flatMap(scene=>scene.filter(card=>card.layer===index+1).map(card=>({
+        x:card.x/frameWidth*viewWidth,y:card.y/frameHeight*viewHeight,
+      }))))
+    : renderOrbitPreview
     ? Array.from({ length: orbitPathCount }, (_, index) => {
         const frames = generateNodeKeyframes({
           ...fitted,
@@ -331,13 +346,26 @@ function GeometryPathEditor({ settings, target }: { settings: MotionSettings; ta
           },
         }, index, orbitPathCount);
         const scale = viewWidth / frameWidth;
-        return frames.map((frame) => (
-          `${viewWidth / 2 + frame.x * scale},${viewHeight / 2 + frame.y * scale}`
-        )).join(" ");
+        return frames.map((frame) => ({
+          x: viewWidth / 2 + frame.x * scale,
+          y: viewHeight / 2 + frame.y * scale,
+        }));
       })
     : [];
   const centerX = viewWidth / 2;
   const centerY = viewHeight / 2;
+  const previewExtent = orbitPreviewPoints.flat().reduce((extent, point) => ({
+    x: Math.max(extent.x, Math.abs(point.x - centerX)),
+    y: Math.max(extent.y, Math.abs(point.y - centerY)),
+  }), { x: 0, y: 0 });
+  const previewCameraScale = renderOrbitPreview ? Math.min(
+    1,
+    (centerX - 18) / Math.max(1, previewExtent.x),
+    (centerY - 18) / Math.max(1, previewExtent.y),
+  ) : 1;
+  const orbitPreviewPaths = orbitPreviewPoints.map((path) => path.map((point) =>
+    `${centerX + (point.x - centerX) * previewCameraScale},${centerY + (point.y - centerY) * previewCameraScale}`,
+  ).join(" "));
   const orbitRotationRadians = circleRotation * Math.PI / 180;
   const rotationCos = Math.cos(orbitRotationRadians);
   const rotationSin = Math.sin(orbitRotationRadians);
@@ -345,7 +373,8 @@ function GeometryPathEditor({ settings, target }: { settings: MotionSettings; ta
     (centerX - 10) / Math.max(Math.abs(rotationCos), 1e-6),
     (centerY - 10) / Math.max(Math.abs(rotationSin), 1e-6),
   );
-  const orientationRadius = Math.min(radiusX + 20, rotationRoom);
+  const handleCameraScale = renderOrbitPreview ? previewCameraScale : 1;
+  const orientationRadius = Math.min(radiusX * handleCameraScale + 20, rotationRoom);
   const rotationAnchor = {
     x: centerX + rotationCos * Math.max(0, orientationRadius - 20),
     y: centerY + rotationSin * Math.max(0, orientationRadius - 20),
@@ -374,7 +403,7 @@ function GeometryPathEditor({ settings, target }: { settings: MotionSettings; ta
     ];
   };
   const start = (event: React.PointerEvent<SVGSVGElement>) => {
-    if (settings.geometry.shape !== "custom-path") return;
+    if (settings.geometry.shape !== "custom-path" || stackPreview) return;
     event.currentTarget.setPointerCapture(event.pointerId);
     drawing.current = true;
     draft.current = [pointFromEvent(event)];
@@ -400,10 +429,10 @@ function GeometryPathEditor({ settings, target }: { settings: MotionSettings; ta
       const localX = dx * Math.cos(radians) - dy * Math.sin(radians);
       const localY = dx * Math.sin(radians) + dy * Math.cos(radians);
       if (activeHandle.current === "x") {
-        const normalized = Math.abs(localX) / bounds.width / editorScale;
+        const normalized = Math.abs(localX) / bounds.width / editorScale / handleCameraScale;
         updateLegacyValue("geometry.radiusX", Math.round(normalized * 100));
       } else {
-        const normalized = Math.abs(localY) / bounds.height / editorScale / Math.max(0.05, Math.abs(ellipseTiltScale));
+        const normalized = Math.abs(localY) / bounds.height / editorScale / handleCameraScale / Math.max(0.05, Math.abs(ellipseTiltScale));
         updateLegacyValue("geometry.radiusY", Math.round(normalized * 100));
       }
       return;
@@ -439,7 +468,7 @@ function GeometryPathEditor({ settings, target }: { settings: MotionSettings; ta
 
   return (
     <div className="orbit-path-controls">
-    <svg ref={editorRef} className={`orbit-path-editor ${renderOrbitPreview ? "orbit-path-editor-preview" : ""}`} style={{ width: `${viewWidth}px` }} viewBox={`0 0 ${viewWidth} ${viewHeight}`} role="img" aria-label={renderOrbitPreview ? "3D trajectory preview" : settings.geometry.shape === "custom-path" ? pathIsClosed ? "Edit a closed motion path" : "Draw an open motion path" : settings.geometry.dynamicScale ? "Ellipse fitted automatically to the selected frame" : "Adjust ellipse width and height"} onPointerDown={start} onPointerMove={move} onPointerUp={finish} onPointerCancel={finish}>
+    <svg ref={editorRef} className={`orbit-path-editor ${renderOrbitPreview ? "orbit-path-editor-preview" : ""}`} style={{ width: `${viewWidth}px` }} viewBox={`0 0 ${viewWidth} ${viewHeight}`} role="img" aria-label={stackPreview ? "Stack shape preview" : renderOrbitPreview ? `${settings.geometry.shape} trajectory preview` : settings.geometry.shape === "custom-path" ? pathIsClosed ? "Edit a closed motion path" : "Draw an open motion path" : settings.geometry.dynamicScale ? "Ellipse fitted automatically to the selected frame" : "Adjust ellipse width and height"} onPointerDown={start} onPointerMove={move} onPointerUp={finish} onPointerCancel={finish}>
       <rect width={viewWidth} height={viewHeight} rx="10" />
       <path className="orbit-path-grid" d={`M${centerX} 0V${viewHeight}M0 ${centerY}H${viewWidth}`} />
       {renderOrbitPreview ? orbitPreviewPaths.map((previewPath, index) => (
@@ -455,14 +484,23 @@ function GeometryPathEditor({ settings, target }: { settings: MotionSettings; ta
         <g className="orbit-orientation-handles">
           {!settings.geometry.dynamicScale && (
             <g transform={`rotate(${circleRotation} ${centerX} ${centerY})`}>
-              <circle className="orbit-path-handle" cx={centerX + radiusX} cy={centerY} r="6" aria-label="Adjust orbit width" onPointerDown={(event) => startHandle(event, "x")} />
-              <circle className="orbit-path-handle" cx={centerX} cy={centerY + projectedRadiusY} r="6" aria-label="Adjust orbit height" onPointerDown={(event) => startHandle(event, "y")} />
+              <circle className="orbit-path-handle" cx={centerX + radiusX * handleCameraScale} cy={centerY} r="6" aria-label="Adjust orbit width" onPointerDown={(event) => startHandle(event, "x")} />
+              <circle className="orbit-path-handle" cx={centerX} cy={centerY + projectedRadiusY * handleCameraScale} r="6" aria-label="Adjust orbit height" onPointerDown={(event) => startHandle(event, "y")} />
             </g>
           )}
           <line className="orbit-handle-guide" x1={rotationAnchor.x} y1={rotationAnchor.y} x2={rotationHandle.x} y2={rotationHandle.y} />
           <circle className="orbit-path-handle orbit-rotation-handle" cx={rotationHandle.x} cy={rotationHandle.y} r="6" aria-label="Rotate orbit" onPointerDown={(event) => startHandle(event, "rotation")} />
           <line className="orbit-handle-guide" x1={tiltGuideX} y1={centerY - tiltTravel} x2={tiltGuideX} y2={centerY + tiltTravel} />
           <circle className="orbit-path-handle orbit-tilt-handle" cx={tiltGuideX} cy={tiltHandleY} r="6" aria-label="Tilt orbit" onPointerDown={(event) => startHandle(event, "tilt")} />
+        </g>
+      )}
+      {lineHandles && (
+        <g className="orbit-orientation-handles">
+          {!settings.geometry.dynamicScale && <g transform={`rotate(${circleRotation} ${centerX} ${centerY})`}>
+            <circle className="orbit-path-handle" cx={centerX + radiusX * handleCameraScale} cy={centerY} r="6" aria-label="Adjust line length" onPointerDown={(event) => startHandle(event, "x")} />
+          </g>}
+          <line className="orbit-handle-guide" x1={rotationAnchor.x} y1={rotationAnchor.y} x2={rotationHandle.x} y2={rotationHandle.y} />
+          <circle className="orbit-path-handle orbit-rotation-handle" cx={rotationHandle.x} cy={rotationHandle.y} r="6" aria-label="Rotate line" onPointerDown={(event) => startHandle(event, "rotation")} />
         </g>
       )}
     </svg>
@@ -1272,7 +1310,12 @@ function App() {
       item.name !== "Version 1" && item.name !== "Ripple" && item.name !== "Tile Wave")
     .map((item) => ({...item, settings: settingsFromSaved(item.values, effectiveValues)}));
   const saveCurrent = () => {
-    const base = familyFor(effectiveValues.preset).name;
+    const origin=referencePreset(effectiveValues.preset);
+    const definition=referenceDefinition(effectiveValues);
+    const currentModel=definition?recipeKey(definition):"trajectory";
+    const originalModel=origin?recipeKey(origin):"trajectory";
+    const base=currentModel===originalModel?familyFor(effectiveValues.preset).name:
+      currentModel==="trajectory"?"Trajectory":recipePresentation[currentModel]?.name??currentModel;
     const names = new Set(savedPresets.map((item) => item.name));
     let number = 1;
     while (names.has(`${base} · ${number}`)) number += 1;
@@ -1329,7 +1372,7 @@ function App() {
       </section>}
 
       <PresetEditor settings={effectiveValues} onChange={applySettingsToStore}
-        theme={theme} panelId={panelId}
+        theme={theme} panelId={panelId} itemCount={activeTarget.count}
         diagnosticsAction={<button className="dialkit-button diagnostics-action" type="button" disabled={!lastDiagnostics || operation !== null}
           onClick={() => void copyDiagnostics(lastDiagnostics ?? undefined)}>
           {diagnosticsCopied ? "Diagnostics copied" : "Copy diagnostics"}

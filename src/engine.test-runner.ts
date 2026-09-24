@@ -73,6 +73,22 @@ const settings: MotionSettings = {
   },
 };
 
+// Position is independent of the path and card rendering for every trajectory shape.
+for (const shape of ["line", "ellipse", "parametric", "custom-path"] as const) {
+  const base = { ...settings, geometry: { ...settings.geometry, units: "percent" as const, dynamicScale: false, shape,
+    radiusX: 25, radiusY: 20, offsetX: 0, offsetY: 0 } };
+  const shifted = { ...base, geometry: { ...base.geometry, offsetX: 15, offsetY: -12 } };
+  const plainFrames = generateNodeKeyframes(fitSettingsToFrame(base, 720, 400, 120, 90), 1, 5);
+  const shiftedFrames = generateNodeKeyframes(fitSettingsToFrame(shifted, 720, 400, 120, 90), 1, 5);
+  for (let index = 0; index < plainFrames.length; index++) {
+    const plain = plainFrames[index], moved = shiftedFrames[index];
+    assert(Math.abs(moved.x - plain.x - 108) < 1e-8, `${shape} Offset X shifts by frame width percentage`);
+    assert(Math.abs(moved.y - plain.y + 48) < 1e-8, `${shape} Offset Y shifts by frame height percentage`);
+    assert(moved.z === plain.z && moved.opacity === plain.opacity && moved.scaleX === plain.scaleX && moved.scaleY === plain.scaleY,
+      `${shape} Offset does not alter depth or appearance`);
+  }
+}
+
 function settingsForPreset(preset: typeof presetOptions[number]["value"]): MotionSettings {
   const tuning = builtInPresetTunings[preset];
   return {

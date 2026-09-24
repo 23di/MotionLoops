@@ -8,6 +8,8 @@ import { presetOptions } from "./types";
 import { referencePreset, referenceDefinition, activeReferencePresets } from "./reference-catalog";
 import { fromMotionDocument, toMotionDocument, validateMotionDocument } from "./motion-system";
 import { compileReference } from "./reference-tracks";
+import { editableVisibleMax } from "./motion-capabilities";
+import { recipeKey, recipePresentation } from "./preset-presentation";
 import type {
   MotionSettings,
   PresetId,
@@ -1177,7 +1179,10 @@ function setTimelineDurations(
 
 async function applyReferenceMotion(settings: MotionSettings): Promise<void> {
   const definition=referenceDefinition(settings)!;
-  const presetLabel=(activeReferencePresets.find(preset=>preset.id===settings.preset)??referencePreset(settings.preset))?.label??definition.label;
+  const origin=referencePreset(settings.preset);
+  const presetLabel=origin&&recipeKey(origin)===recipeKey(definition)
+    ? (activeReferencePresets.find(preset=>preset.id===settings.preset)??origin).label
+    : recipePresentation[recipeKey(definition)]?.name??definition.label;
   const targets=resolveTargets(settings.other.scope);
   logDiagnostic("reference.targets", {
     preset: settings.preset,
@@ -1186,6 +1191,9 @@ async function applyReferenceMotion(settings: MotionSettings): Promise<void> {
     targetCount: targets.length,
   });
   if(targets.length<definition.minSlots||targets.length>definition.maxSlots)throw new Error(`${definition.label} needs ${definition.minSlots}–${definition.maxSlots} selected cards.`);
+  if(["rfCarousel","rfStack"].includes(recipeKey(definition))&&
+    Number(settings.reference?.visible)>editableVisibleMax(targets.length))
+    throw new Error(`Visible cards can be at most ${editableVisibleMax(targets.length)} with ${targets.length} selected cards.`);
   const owner=targets[0].getTopLevelFrame();
   if(!owner||targets.some(node=>node.getTopLevelFrame()?.id!==owner.id))throw new Error("Select cards in one top-level frame.");
   const sourceIds=targets.map(node=>node.id),ownerId=owner.id,width=owner.width,height=owner.height;

@@ -1,10 +1,10 @@
 import { builtInPresetTunings } from "./presets";
 import { cloneData } from "./clone-data";
 import { schemaForShape, type EditorSchema } from "./editor-schema";
-import { referencePreset, referenceDefinition, activeReferencePresets } from "./reference-catalog";
+import { referencePreset, referenceDefinition, activeReferencePresets, referenceModelCompositions } from "./reference-catalog";
 import { recipeKey } from "./preset-presentation";
 import { preferredSettings } from "./preferred-numbers";
-import { pulseDefaults } from "./motion-modifiers";
+import { defaultQueueEasing, pulseDefaults } from "./motion-modifiers";
 import { referenceEditor, referenceDefaults } from "./reference-controls";
 import type { MotionSettings, PresetId } from "./types";
 import { documentFromValues, fromMotionDocument, toMotionDocument } from "./motion-system";
@@ -33,9 +33,7 @@ export const familyFor = (id: PresetId) => families.find((family) => family.vari
 export function editorFor(settings: MotionSettings):EditorSchema {
   const reference=referenceDefinition(settings);
   if(reference)return referenceEditor(reference.id);
-  const preset = builtInPresetTunings[settings.preset as keyof typeof builtInPresetTunings];
-  return preset && settings.geometry.shape === preset.geometry.shape && preset.editor
-    ? preset.editor : schemaForShape(settings);
+  return schemaForShape(settings);
 }
 
 export function freshPreset(id: PresetId, previous?: MotionSettings): MotionSettings {
@@ -48,23 +46,34 @@ function presetSettings(id: PresetId, previous?: MotionSettings): MotionSettings
   const reference=referencePreset(id);
   if(reference){
     const base=freshPreset("circle",previous);
-    return {...base,preset:id,renderer:recipeKey(reference),reference:referenceDefaults(id),motion:{...base.motion,duration:reference.duration,fullCycle:{type:"easing",duration:1,ease:[.86,.14,.14,.86]}}};
+    const row=reference.mode==="rfCarousel";
+    const composition=referenceModelCompositions[reference.mode]??{};
+    const referenceValues=referenceDefaults(id);
+    const rowEase=["easeX1","easeY1","easeX2","easeY2"].map(key=>referenceValues[key]);
+    return {...base,preset:id,renderer:recipeKey(reference),reference:referenceDefaults(id),
+      geometry:{...base.geometry,...composition.geometry},
+      appearance:{...base.appearance,...composition.appearance},
+      motion:{...base.motion,...composition.motion,duration:reference.duration,
+        queueEasing:row&&rowEase.every(value=>typeof value==="number")
+          ? {type:"easing",duration:1,ease:rowEase as [number,number,number,number]}:base.motion.queueEasing,
+        fullCycle:{type:"easing",duration:1,ease:[.86,.14,.14,.86]}}};
   }
   const tuning = builtInPresetTunings[id as keyof typeof builtInPresetTunings];
   return {
     preset: id,
     renderer: "legacy",
-    motion: { duration: 5, stagger: 0, keyframes: 32, direction: "clockwise", fullCycle: { type: "easing", duration: 1, ease: [0, 0, 1, 1] }, ...pulseDefaults, ...tuning.motion },
+    motion: { duration: 5, stagger: 0, keyframes: 32, direction: "clockwise", queue:false, queueStep:1, queueEasing:{...defaultQueueEasing}, fullCycle: { type: "easing", duration: 1, ease: [0, 0, 1, 1] }, ...pulseDefaults, ...tuning.motion },
     geometry: {
       units: "percent", shape: "parametric", dynamicScale: true,
       pathScale: 1,
       customPath: "[[0,0.5],[1,0.5]]", radiusX: 50, radiusY: 40, circleRotation: 0,
+      offsetX: 0, offsetY: 0,
       depth: 65, tilt: 0, turns: 1, rotation: 0, orient3d: false,
       xWave: "cos", yWave: "sin", depthWave: "sin", xFrequency: 1, yFrequency: 1, depthFrequency: 1,
       xAmplitude: 1, yAmplitude: 1, depthAmplitude: 1, xPhase: 0, yPhase: 0, depthPhase: 0, yOffset: 0,
       shapeAmount: 1, itemSpread: 1, depthFalloff: 1, ...tuning.geometry,
     },
-    appearance: { cardSize: 58, nearScale: 1.25, farScale: 0.55, farOpacity: 0.28, fadeStart: 0, fadeEnd: 100,
+    appearance: { cardSize: 58, sizeBasis:"standard", adaptiveSize:true, nearScale: 1.25, farScale: 0.55, farOpacity: 0.28, fadeStart: 0, fadeEnd: 100,
       opacityCurve: "linear", facePath: false, farBlur: 0, frontShadow: 0, ...tuning.appearance },
     other: { centerBeforeApply: previous?.other.centerBeforeApply ?? true,
       scope: previous?.other.scope ?? "selection", serviceLayers: "4", ...tuning.other },
@@ -111,6 +120,14 @@ export function settingsFromSaved(values: Record<string, unknown>, fallback: Mot
       const value = values[`${group}.${key}`] ?? values[`${group}.advanced.${key}`];
       if (value !== undefined) (result[group] as unknown as Record<string, unknown>)[key] = value;
     }
+  }
+  if(rendererDefinition?.mode==="rfStack"&&values["reference.exitFade"]===undefined){
+    // Older Stack settings carried a dormant circle geometry and queue=false.
+    // Those fields were ignored by the old renderer, so restore its visible
+    // vertical Queue behavior when the fields become editable.
+    result.geometry.shape="line";
+    result.geometry.circleRotation=90;
+    result.motion.queue=true;
   }
   if (result.motion.fullCycle.type !== "spring") result.motion.fullCycle = { ...result.motion.fullCycle, duration: result.motion.fullCycle.duration || 1 };
   return result;

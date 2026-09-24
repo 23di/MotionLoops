@@ -1,4 +1,4 @@
-import { presetOptions, type MotionSettings } from "./types";
+import { presetOptions, type DialTransition, type MotionSettings } from "./types";
 import { migrateBloomSettings } from "./motion-modifiers";
 import { referencePreset, referencePresets, referenceDefinition } from "./reference-catalog";
 import { recipeKey, recipePresentation } from "./preset-presentation";
@@ -67,6 +67,8 @@ export function migrateSettingsToPercent(
       units: "percent",
       radiusX: settings.geometry.radiusX / width * 100,
       radiusY: settings.geometry.radiusY / height * 100,
+      offsetX: (settings.geometry.offsetX ?? 0) / width * 100,
+      offsetY: (settings.geometry.offsetY ?? 0) / height * 100,
       depth: settings.geometry.depth / Math.min(width, height) * 100,
     },
   };
@@ -107,6 +109,8 @@ export function parseSettingsJson(text: string, current: MotionSettings): Motion
   const incoming=candidate as Record<string,unknown>;
   const incomingMotion=incoming.motion as Record<string,unknown>;
   if("fullCycle" in incomingMotion)validateTransition(incomingMotion.fullCycle as MotionSettings["motion"]["fullCycle"]);
+  if("queueEasing" in incomingMotion)validateTransition(incomingMotion.queueEasing as DialTransition);
+  if(!("queueEasing" in incomingMotion)&&incomingMotion.queueStep===.68)incomingMotion.queueStep=1;
   const source=typeof incoming.preset==="string"?referencePreset(incoming.preset):undefined;
   const renderer=typeof incoming.renderer==="string"?incoming.renderer:source?recipeKey(source):"legacy";
   oneOf(renderer,["auto","legacy",...Object.keys(recipePresentation)],"settings.renderer");
@@ -115,6 +119,18 @@ export function parseSettingsJson(text: string, current: MotionSettings): Motion
   if(definition)template.reference=referenceDefaults(definition.id);
   else delete template.reference;
   const settings = mergeCompatible(template, candidate, "settings") as MotionSettings;
+  if(definition?.mode==="rfStack"){
+    // Legacy Stack JSON had these fields, but its renderer did not use them.
+    settings.geometry.shape="line";
+    settings.geometry.circleRotation=90;
+    settings.motion.queue=true;
+  }
+  if(definition?.mode==="rfCarousel"&&!("queueEasing" in incomingMotion)&&isRecord(incoming.reference)){
+    const keys=["easeX1","easeY1","easeX2","easeY2"];
+    if(keys.every(key=>typeof (incoming.reference as Record<string,unknown>)[key]==="number"))
+      settings.motion.queueEasing={type:"easing",duration:1,
+        ease:keys.map(key=>(incoming.reference as Record<string,number>)[key]) as [number,number,number,number]};
+  }
   if(settings.reference){
     const schema=referenceEditor(definition!.id);
     for(const [key,value] of Object.entries(settings.reference)){
@@ -133,7 +149,7 @@ export function parseSettingsJson(text: string, current: MotionSettings): Motion
   oneOf(settings.motion.direction, ["clockwise", "counterclockwise"], "settings.motion.direction");
   if((settings.appearance.cardSize??0)<0)throw new Error("Card size must be non-negative.");
   oneOf(settings.geometry.shape, [
-    "ellipse", "custom-path", "parametric", "sphere", "deck", "shuffle", "tunnel",
+    "line", "ellipse", "custom-path", "parametric", "sphere", "deck", "shuffle", "tunnel",
     "cylinder", "racetrack", "focus-deck", "fan", "pendulum", "vortex",
     "falling-stack", "crosscurrent", "tile-wave",
   ], "settings.geometry.shape");
@@ -148,5 +164,6 @@ export function parseSettingsJson(text: string, current: MotionSettings): Motion
   if(!("renderer" in incoming))delete settings.renderer;
   if(isRecord(incoming.appearance)&&!("cardSize" in incoming.appearance))delete settings.appearance.cardSize;
   validateTransition(settings.motion.fullCycle, toMotionDocument(settings).model);
+  if(settings.motion.queueEasing)validateTransition(settings.motion.queueEasing, toMotionDocument(settings).model);
   return settings;
 }

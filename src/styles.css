@@ -726,6 +726,11 @@ main {
   display: none !important;
 }
 
+.orbit-control-disabled {
+  opacity: .45;
+  pointer-events: none;
+}
+
 .orbit-service-layers-control .dialkit-segmented {
   padding: 2px;
   background: color-mix(in srgb, var(--orbit-text) 5%, transparent);

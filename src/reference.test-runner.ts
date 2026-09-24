@@ -20,7 +20,7 @@ for(const preset of activeReferencePresets.filter(p=>p.mode==="rfCarousel")){
   assert(editorFor(freshPreset(preset.id)).quickControls?.includes("reference.scaleFocus"),"Row exposes the larger edge as a quick control");
   assert(editorFor(freshPreset(preset.id)).quickControls?.includes("reference.gap"),"Row exposes gap as a quick control");
   assert(editorFor(freshPreset(preset.id)).quickControls?.includes("reference.visible"),"Row exposes visible cards as a quick control");
-  assert(!editorFor(freshPreset(preset.id)).controls?.includes("reference.tiltStyle"),"Row tilt style is removed from the editor");
+  assert(editorFor(freshPreset(preset.id)).controls?.includes("reference.tiltStyle"),"Row tilt style is editable");
   assert.equal(freshPreset(preset.id).reference?.direction,"right","Every Row recipe previews moving right by default");
   const settings=freshPreset(preset.id),sources=[{width:120,height:160},{width:120,height:160}];
   const atVisible=(visible:number)=>referenceScene({...settings,reference:{...settings.reference,visible,scaleCenter:"off"}},sources,720,400,1.3);

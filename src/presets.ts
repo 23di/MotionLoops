@@ -1,10 +1,8 @@
 import type { MotionSettings, LegacyPresetId as PresetId } from "./types";
-import type { EditorSchema } from "./editor-schema";
 import { orbitOneGeometry, orbitOneAppearance } from "./motion-modifiers";
 
 export type PresetTuning = {
   preservePrecision?: boolean;
-  editor?: EditorSchema;
   motion?: Partial<MotionSettings["motion"]>;
   geometry: Partial<MotionSettings["geometry"]>;
   appearance: Partial<MotionSettings["appearance"]>;

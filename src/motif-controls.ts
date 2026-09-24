@@ -3,10 +3,6 @@ import { motifPresets, type MotifPreset } from "./motif-catalog";
 import type { EditorSchema } from "./editor-schema";
 
 type Parameter={type:string;key:string;label:string;default:number|string|boolean;min?:number;max?:number;step?:number;unit?:string;group:string;options?:readonly {value:string;label:string}[]};
-const productRecipeDefaults={
-  vortex:{geometry:{turnCount:4}},
-  circle:{geometry:{horizontalRadius:36}},
-} as const;
 export function motifFactor(key:string){return key==="scaleIntensity"?100:["xOffset","stackOffset"].includes(key)?1/5.6:1;}
 export const motifControlConfig:DialConfig={cropAspect:{type:"select",default:"1:1",options:["natural","1:1","4:5","3:2","16:9","9:16"]}};
 for(const preset of motifPresets)for(const parameter of preset.params as readonly Parameter[]){
@@ -15,8 +11,7 @@ for(const preset of motifPresets)for(const parameter of preset.params as readonl
 }
 export function motifDefaults(preset:MotifPreset):Record<string,number|string|boolean>{
   const defaults:Record<string,number|string|boolean>={cropAspect:preset.defaultCropAspect,cornerRadius:preset.defaultBorderRadius/10.8,...Object.fromEntries(preset.params.map(parameter=>[parameter.key,typeof parameter.default==="number"?parameter.default*motifFactor(parameter.key):parameter.default]))};
-  if(preset.templateId==="LoopSwirlTemplate")defaults.turns=productRecipeDefaults.vortex.geometry.turnCount;
-  if(preset.templateId==="LoopRingTemplate")defaults.radiusX=productRecipeDefaults.circle.geometry.horizontalRadius;
+  if("productSettings" in preset)Object.assign(defaults,preset.productSettings);
   return defaults;
 }
 export function motifEditor(preset:MotifPreset):EditorSchema{

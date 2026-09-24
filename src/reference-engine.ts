@@ -1,6 +1,7 @@
-import { pointForGeometry } from "./engine";
+import { pointForGeometry, queueTransitionProgress } from "./engine";
 import { referenceDefinition } from "./reference-catalog";
 import type { MotionSettings } from "./types";
+import { adaptiveCardScale, cardBaseSize, cardGapPx } from "./card-presentation";
 import { motifScene } from "./motif-engine";
 
 export type SourceSize = { width: number; height: number };
@@ -11,17 +12,7 @@ const wrap = (x: number, length = 1) => ((x % length) + length) % length;
 // Same cubic inversion and precision as the source renderer; easing applies
 // to individual transitions, not a second time to the whole loop.
 export function referenceEase(x: number, handles: readonly number[] = [.86,.14,.14,.86]): number {
-  if (x <= 0) return 0;
-  if (x >= 1) return 1;
-  const [x1,y1,x2,y2] = handles;
-  let t = x;
-  for (let i=0;i<12;i++) {
-    const value=(1-t)**3*0+3*(1-t)**2*t*x1+3*(1-t)*t**2*x2+t**3;
-    const slope=3*(1-t)**2*x1+6*(1-t)*t*(x2-x1)+3*t**2*(1-x2);
-    if (Math.abs(slope)<1e-7) break;
-    t=clamp(t-(value-x)/slope);
-  }
-  return (1-t)**3*0+3*(1-t)**2*t*y1+3*(1-t)*t**2*y2+t**3;
+  return queueTransitionProgress(x,1,{type:"easing",duration:1,ease:handles as [number,number,number,number]});
 }
 function inverseEase(y: number, ease: (x:number)=>number) {
   if(y<=0||y>=1)return clamp(y);
@@ -56,7 +47,10 @@ export function referenceScene(settings: MotionSettings, sizes: readonly SourceS
   const phaseInput=seconds/Math.max(.01,settings.motion.duration);
   const phase=phaseInput>=0&&phaseInput<1?phaseInput:wrap(phaseInput);
   const handles=[number("easeX1",.86),number("easeY1",.14),number("easeX2",.14),number("easeY2",.86)];
-  const ease=(x:number)=>referenceEase(x,handles);
+  const queueEasing=preset.mode==="rfCarousel"&&settings.motion.queueEasing
+    ? settings.motion.queueEasing
+    : {type:"easing" as const,duration:1,ease:handles as [number,number,number,number]};
+  const ease=(x:number)=>queueTransitionProgress(x,1,queueEasing);
   const cycles=number("cycles",1);
   const cards: NativeCard[]=[];
   const radius=number("cornerRadius",0)*height/100;
@@ -69,8 +63,9 @@ export function referenceScene(settings: MotionSettings, sizes: readonly SourceS
     const visibleLimit=Math.max(1,Math.min(20,Math.round(number("visible",count))));
     // Visible cards controls the camera scale as well as the population cap.
     // Keep card-size and gap independently editable around the reference size.
-    const rowZoom=(vertical?height:width)/(visibleLimit*600);
-    const plane=Math.round(number("planeSize",600/1080*100)*10.8*1e10)/1e10*rowZoom,gap=Math.round(number("gap",40/1080*100)*10.8*1e10)/1e10*rowZoom,pitch=plane+gap;
+    const baseSizes=sizes.slice(0,count).map(size=>cardBaseSize(settings,width,height,size.width,size.height));
+    const plane=Math.max(...baseSizes.map(size=>vertical?size.height:size.width));
+    const gap=cardGapPx(settings,width,height,p),pitch=plane+gap;
     const overlap=gap<height/1080*.5?height/1080:0;
     const offsetX=number("offsetX",0)*width/100,offsetY=number("offsetY",0)*height/100;
     const solo=p.solo===true,depthFade=clamp(number("depthFade",0)/100),extent=vertical?height:width;
@@ -82,17 +77,20 @@ export function referenceScene(settings: MotionSettings, sizes: readonly SourceS
     const edge=scales&&focus!=="center",focusSign=focus==="start"||focus==="left"?-1:1,span=Math.max(pitch,(visibleLimit-1)/2*pitch);
     const bias=edge?Math.max(-.9,Math.min(.9,plane*(centerScale-1)*focusSign/Math.max(1,pitch))):0;
     const bend=(x:number)=>Math.abs(x)<=span?x*x/(2*span):Math.abs(x)-span/2;
-    const curved=str("pathShape","line")!=="line";
+    const shape=settings.geometry.shape;
+    const curved=shape!=="line";
     const prepared:Array<{pathPosition:number;source:number;x:number;y:number;width:number;distance:number;rotation:number;shade:number}>=[];
     for(let item=0;item<count;item++){
       const source=sign>0?wrap(count-item,count):item,aspect=sizes[source].width/sizes[source].height;
-      const cardWidth=vertical?plane*aspect:plane,cardHeight=vertical?plane:plane/aspect;
+      const cardWidth=baseSizes[source].width,cardHeight=baseSizes[source].height;
       const bound=(vertical?height/2+cardHeight:width/2+cardWidth)+Math.abs(vertical?offsetY:offsetX);
       const repeat=pitch*count>0?Math.ceil(bound/(pitch*count))+1:1;
       for(let copy=-repeat;copy<=repeat;copy++){
         const absolute=item+copy*count,timingIndex=curved?item:absolute,delayIndex=sign<0?timingIndex:count-1-timingIndex;
         let progress=0;
-        if(period>0){const shifted=seconds-delayIndex*stagger,whole=Math.floor(shifted/period),local=shifted-whole*period;progress=whole+ease(clamp(duration>0?local/duration:1));}
+        if(settings.motion.queue!==false){
+          if(period>0){const shifted=seconds-delayIndex*stagger,whole=Math.floor(shifted/period),local=shifted-whole*period;progress=whole+queueTransitionProgress(duration>0?local/duration:1,1,queueEasing);}
+        }else progress=phase*count*cycles;
         const position=(absolute+sign*progress-start)*pitch;
         const scale=edge?Math.max(.1,1+(centerScale-1)*Math.max(-1,Math.min(1,focusSign*position/span))):1+(centerScale-1)*(scales&&span>0?Math.max(0,1-Math.abs(position)/span):0);
         const location=bias!==0?position+bias*bend(position):position,normalized=Math.max(-1,Math.min(1,location/Math.max(1,extent/2)));
@@ -139,7 +137,7 @@ export function referenceScene(settings: MotionSettings, sizes: readonly SourceS
       prepared.sort((a,b)=>byDistance(b,a));
     }
     const pathSettings={...settings,motion:{...settings.motion,radiusPulse:0,scalePulse:0,opacityPulse:0,depthPulse:0},
-      geometry:{...settings.geometry,shape:str("pathShape","ellipse") as MotionSettings["geometry"]["shape"]}};
+      geometry:{...settings.geometry,shape:shape as MotionSettings["geometry"]["shape"]}};
     const project=(angle:number,source:number)=>{
       const point=pointForGeometry(angle,pathSettings,source,count);
       const rawX=point.x*width/100,rawY=point.y*height/100;
@@ -170,7 +168,7 @@ export function referenceScene(settings: MotionSettings, sizes: readonly SourceS
       let widest=0,tallest=0;
       for(let source=0;source<count;source++){
         const aspect=sizes[source].width/sizes[source].height;
-        const widthOf=(vertical?plane*aspect:plane)*(scales?centerScale:1)+overlap;
+        const widthOf=baseSizes[source].width*(scales?centerScale:1)+overlap;
         widest=Math.max(widest,widthOf);tallest=Math.max(tallest,widthOf/aspect);
       }
       // A tall source can exceed the frame even with a zero-radius path.
@@ -198,27 +196,55 @@ export function referenceScene(settings: MotionSettings, sizes: readonly SourceS
       else cards[cards.length-1].shade=card.shade>.01?card.shade:0;
     }
   }else if(preset.mode==="rfStack"){
-    const duration=Math.max(0,number("duration",1.33)),step=duration+Math.max(0,number("delay",.67));
+    const duration=Math.max(0,number("duration",1.33));
+    const step=duration+(settings.motion.queue===false?0:Math.max(0,number("delay",.67)));
     if(step<=0)return [];
     const t=wrap(phase*Math.round(step*count*cycles*1e5)/1e5,step*count),index=Math.floor(t/step),local=t-index*step;
-    const visible=Math.max(2,Math.min(8,number("visible",4)|0)),stagger=Math.max(0,number("stagger",1/30));
+    const visible=Math.max(1,Math.min(20,Math.round(number("visible",4)))),stagger=Math.max(0,number("stagger",1/30));
     const zoom=Math.max(.1,number("zoom",100)/100),size=Math.max(.01,Math.min(2,number("planeSize",60)/100))*zoom;
     const perspective=Math.max(0,Math.min(2,number("perspective",50)/50));
     const offsetX=number("offsetX",0)*width/100,offsetY=number("offsetY",0)*height/100;
     const mid=(.43+.544)*height/2,half=(.544-.43)*height/2*zoom;
-    const back=mid-half+offsetY,front=mid+half+offsetY,pitch=(front-back)/(visible-1);
+    const back=mid-half+offsetY,front=mid+half+offsetY,pitch=(front-back)/Math.max(visible-1,1);
     const frontSize=size*height,backSize=frontSize*Math.max(.05,1-.158*perspective);
     const sizePower=Math.max(.05,1-.15*perspective),positionPower=Math.max(.1,1-.075*perspective);
     const tailPitch=Math.max(0,1-.84*perspective),tailScale=Math.max(.05,1-.147*perspective);
     for(let slot=-1;slot<=visible;slot++){
       const source=wrap(index+visible-1-slot,count),elapsed=local-(visible-1-slot)*stagger;
-      const position=slot+ease(duration>0?clamp(elapsed/duration):1);
-      if(position<-.5||position>visible-.5)continue;
-      const k=position/(visible-1);
+      const position=slot+(settings.motion.queue===false
+        ? duration>0?clamp(elapsed/duration):1
+        : ease(duration>0?clamp(elapsed/duration):1));
+      const limit=visible===1?1:.5;
+      if(position< -limit||position>visible-1+limit)continue;
+      const k=position/Math.max(visible-1,1);
       let y=position<0?back+position*pitch*tailPitch:k>1?front+(front-back)*positionPower*(k-1):back+(front-back)*Math.pow(k,positionPower);
       if(str("direction","down")==="up")y=height-y+2*offsetY;
       const h=position<0?backSize*(1+position*(1-tailScale)):k>1?frontSize+(frontSize-backSize)*sizePower*(k-1):backSize+(frontSize-backSize)*Math.pow(k,sizePower);
-      add(source,slot+1,width/2+offsetX,y,h*sizes[source].width/sizes[source].height,h);
+      const cardHeight=h*adaptiveCardScale(sizes[source].width,sizes[source].height,settings.appearance.adaptiveSize!==false);
+      const shape=settings.geometry.shape;
+      let x=width/2+offsetX,projectedY=y;
+      if(shape==="line"){
+        const angle=(settings.geometry.circleRotation-90)*Math.PI/180;
+        const distance=(y-(mid+offsetY))*settings.geometry.radiusX/50;
+        x-=distance*Math.sin(angle);
+        projectedY=y+(distance*Math.cos(angle)-(y-(mid+offsetY)));
+      }else{
+        const pathPosition=position/Math.max(visible-1,1);
+        const point=pointForGeometry(pathPosition*Math.PI*2,settings,source,count);
+        x+=point.x*width/100;
+        projectedY=mid+offsetY+point.y*height/100;
+      }
+      add(source,slot+1,x,projectedY,cardHeight*sizes[source].width/sizes[source].height,cardHeight);
+      const exitFade=Math.max(0,Math.min(1,number("exitFade",0)/100));
+      if(exitFade>0){
+        const fadeWidth=limit*exitFade;
+        cards[cards.length-1].opacity=1-clamp((position-(visible-1+limit-fadeWidth))/fadeWidth);
+      }
+    }
+    if(cards.length>visible){
+      const nearest=[...cards].sort((a,b)=>Math.abs(a.y-(mid+offsetY))-Math.abs(b.y-(mid+offsetY)))
+        .slice(0,visible).sort((a,b)=>a.layer-b.layer);
+      cards.splice(0,cards.length,...nearest);
     }
   }else if(preset.mode==="rfFlicker"){
     const duration=Math.max(.1,number("duration",6)),step=duration/count,hold=Math.min(.95*step,Math.max(0,number("delay",0)));
@@ -262,6 +288,19 @@ export function referenceScene(settings: MotionSettings, sizes: readonly SourceS
       const w=fill?width*card.fraction:source.width*fit,h=fill?height*card.fraction:source.height*fit;
       add(card.source,layer,ax*width+(.5-ax)*w,ay*height+(.5-ay)*h,w,h,card.rotation,radius*card.fraction,fill);
     });
+  }
+  if(preset.mode==="rfCarousel"&&settings.motion.queue===false){
+    const pulse=Math.sin(Math.PI*phase)**2;
+    const radiusScale=1+(settings.motion.radiusPulse??0)*pulse;
+    for(const card of cards){
+      card.x=width/2+(card.x-width/2)*radiusScale;
+      card.y=height/2+(card.y-height/2)*radiusScale;
+      const depth=1+(settings.motion.depthPulse??0)*pulse*.25*
+        Math.cos(phase*Math.PI*2+card.source*Math.PI*2/count);
+      const size=(1+(settings.motion.scalePulse??0)*pulse)*depth;
+      card.width*=size;card.height*=size;
+      card.opacity=(card.opacity??1)*(1-(settings.motion.opacityPulse??0)*pulse);
+    }
   }
   return cards;
 }

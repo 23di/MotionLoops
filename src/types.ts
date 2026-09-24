@@ -33,6 +33,7 @@ export type OpacityCurve = "linear" | "early" | "late" | "soft" | "sharp";
 export type WaveFunction = "sin" | "cos";
 export type GeometryUnits = "percent" | "pixels";
 export type GeometryShape =
+  | "line"
   | "crosscurrent"
   | "tile-wave"
   | "ellipse"
@@ -82,6 +83,9 @@ export interface MotionSettings {
     scalePulse?: number;
     opacityPulse?: number;
     depthPulse?: number;
+    queue?: boolean;
+    queueStep?: number;
+    queueEasing?: DialTransition;
   };
   geometry: {
     units: GeometryUnits;
@@ -90,6 +94,8 @@ export interface MotionSettings {
     customPath: string;
     radiusX: number;
     radiusY: number;
+    offsetX?: number;
+    offsetY?: number;
     pathScale?: number;
     circleRotation: number;
     depth: number;
@@ -116,6 +122,8 @@ export interface MotionSettings {
   };
   appearance: {
     cardSize?: number;
+    sizeBasis?: "standard" | "row";
+    adaptiveSize?: boolean;
     nearScale: number;
     farScale: number;
     farOpacity: number;

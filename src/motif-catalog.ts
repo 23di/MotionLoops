@@ -3,6 +3,7 @@ export const motifPresets = [
   {
     "collection": "motif",
     "templateId": "LoopSwirlTemplate",
+    "productSettings": {"turns":4},
     "label": "Swirl",
     "description": "Media rides a spiral between the edge of the frame and its centre, turning to follow the curve.",
     "category": "Spiral",
@@ -116,6 +117,7 @@ export const motifPresets = [
   {
     "collection": "motif",
     "templateId": "LoopRingTemplate",
+    "productSettings": {"radiusX":36},
     "label": "Ring",
     "description": "A ring of cards spinning around one centre, each turned to follow the curve.",
     "category": "Orbit",

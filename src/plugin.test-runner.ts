@@ -974,7 +974,7 @@ for(const preset of [...referencePresets,{...referencePresets.find(p=>p.id==="re
   for(const [index,card] of cards.entries()){card.relativeTransform=[[1,0,301+index*139],[0,1,423]];parent.insertChild(parent.children.length,card);}
   globalThis.figma.currentPage.selection=cards;
   const settings=freshPreset(preset.id),messageStart=postedMessages.length;
-  if("queueShape" in preset)settings.reference!.pathShape=preset.queueShape;
+  if("queueShape" in preset)settings.geometry.shape=preset.queueShape as MotionSettings["geometry"]["shape"];
   if(preset.id==="reference-carousel-01")settings.motion.duration=200;
   await onMessage({type:"apply",settings:toMotionDocument(settings)});
   const errors=postedMessages.slice(messageStart).filter(m=>m.kind==="error");
@@ -1074,6 +1074,24 @@ for(const id of ["circle","orbit-3d-tilted","orbit-3d-helix","orbit-3d-eight"]){
   await onMessage({type:"clear",scope:"selection"});
   assert(!card.getPluginData("orbit-motion"),id+": canonical Clear");
 }
+
+const refreshPair=[makeNode("Refresh pair A"),makeNode("Refresh pair B")];
+for(const card of refreshPair)parent.insertChild(parent.children.length,card);
+globalThis.figma.currentPage.selection=refreshPair;
+const pairSettings=freshPreset("circle");
+pairSettings.other.serviceLayers="3";
+for(let pass=0;pass<2;pass++){
+  const messageStart=postedMessages.length;
+  await onMessage({type:"apply",settings:pairSettings});
+  assert(!postedMessages.slice(messageStart).some(message=>message.kind==="error"),"Two-card Apply and Refresh succeed");
+  for(const card of refreshPair){
+    const marker=JSON.parse(card.getPluginData("orbit-motion"));
+    const services=parent.children.filter((child:any)=>JSON.parse(child.getPluginData("orbit-motion")||"null")?.sourceId===card.id);
+    assert.equal(services.length,2,"Reapplying two original cards keeps exactly the configured service count per card");
+    assert.deepEqual(new Set(marker.serviceIds),new Set(services.map((service:any)=>service.id)),"Original links reference all and only live service layers");
+  }
+}
+await onMessage({type:"clear",scope:"selection"});
 
 const autoLayoutLead=makeNode("Auto layout lead");
 autoLayoutLead.width=120;

@@ -5,7 +5,8 @@ import type {
   OpacityCurve,
   WaveFunction,
 } from "./types";
-import { migrateBloomSettings } from "./motion-modifiers";
+import { defaultQueueEasing, migrateBloomSettings } from "./motion-modifiers";
+import { cardBaseSize, cardGapPx } from "./card-presentation";
 
 export interface PointState {
   radius?: number;
@@ -42,7 +43,7 @@ export function supportsPathGeometry(shape: GeometryShape): boolean {
 }
 
 export function supportsOrbitOrientation(settings: MotionSettings["geometry"]): boolean {
-  return settings.orient3d;
+  return settings.orient3d && settings.shape !== "line";
 }
 
 const clamp = (value: number, min: number, max: number) =>
@@ -110,13 +111,15 @@ export function fitSettingsToFrame(
 
   const padding = Math.min(frameWidth, frameHeight) * 0.02;
   const percentUnits = settings.geometry.units === "percent";
-  const desiredScale = settings.appearance.nearScale * (percentUnits && (settings.appearance.cardSize ?? 0) > 0
-    ? frameHeight * settings.appearance.cardSize! / 100 / itemHeight : 1);
+  const offsetX = percentUnits ? frameWidth * (settings.geometry.offsetX ?? 0) / 100 : settings.geometry.offsetX ?? 0;
+  const offsetY = percentUnits ? frameHeight * (settings.geometry.offsetY ?? 0) / 100 : settings.geometry.offsetY ?? 0;
+  const desiredScale = settings.appearance.nearScale * (percentUnits
+    ? cardBaseSize(settings,frameWidth,frameHeight,itemWidth,itemHeight).scale : 1);
   const verticalFootprint = settings.geometry.shape === "falling-stack" ? 1.36 : 1;
   const gridMotion = settings.geometry.shape === "tile-wave" || settings.geometry.shape === "crosscurrent";
   const gridColumns = gridMotion ? Math.ceil(Math.sqrt(Math.max(1, count))) : 1;
   const gridRows = gridMotion ? Math.ceil(Math.max(1, count) / gridColumns) : 1;
-  const fitScale = settings.geometry.dynamicScale
+  const fitScale = settings.geometry.dynamicScale && settings.appearance.sizeBasis!=="row"
     ? Math.max(settings.appearance.cardSize ? 0.0001 : 0.05, Math.min(
         desiredScale,
         (frameWidth - padding * 2) / (itemWidth * (gridMotion ? gridColumns + 0.3 : 1)),
@@ -145,7 +148,8 @@ export function fitSettingsToFrame(
   if (settings.geometry.shape === "falling-stack") {
     // Define the stack in proportions of the rendered card, then convert to
     // Figma's pixel translation while respecting the containing frame.
-    const desiredTravel = itemHeight * nearScale * 0.18 * settings.geometry.itemSpread / 0.72;
+    const desiredTravel = itemHeight * nearScale * 0.18 * settings.geometry.itemSpread / 0.72 *
+      (settings.geometry.radiusY / 40);
     const verticalTravel = settings.geometry.dynamicScale
       ? Math.min(availableY, desiredTravel)
       : desiredTravel;
@@ -154,6 +158,7 @@ export function fitSettingsToFrame(
   }
   if (settings.geometry.dynamicScale && !radiusXOverRange && !radiusYOverRange && (
     settings.geometry.shape === "ellipse" ||
+    settings.geometry.shape === "parametric" ||
     supportsOrbitOrientation(settings.geometry)
   )) {
     const rotation = (settings.geometry.circleRotation ?? 0) * Math.PI / 180;
@@ -169,6 +174,14 @@ export function fitSettingsToFrame(
     radiusX *= fit;
     radiusY *= fit;
   }
+  if(settings.geometry.shape==="line"&&settings.reference&&percentUnits){
+    // Keep the same minimum edge gap for every timing recipe on a line.
+    const angle=(settings.geometry.circleRotation??0)*Math.PI/180;
+    const cardExtent=(Math.abs(Math.cos(angle))*itemWidth+Math.abs(Math.sin(angle))*itemHeight)*
+      (nearScale+settings.appearance.farScale*scaleRatio)/2;
+    const pitch=cardExtent+cardGapPx(settings,frameWidth,frameHeight);
+    radiusX=Math.max(radiusX,pitch*Math.max(1,count)/2);
+  }
 
   return {
     ...settings,
@@ -177,6 +190,8 @@ export function fitSettingsToFrame(
       units: "pixels",
       radiusX,
       radiusY,
+      offsetX,
+      offsetY,
       depth: resolvedDepth,
     },
     appearance: {
@@ -370,6 +385,15 @@ export function pointForGeometry(
   pathAngle = parametric.pathAngle;
 
   switch (settings.geometry.shape) {
+    case "line": {
+      const travel = (cycle * 2 - 1) * rx;
+      const rotation = circleRotation * Math.PI / 180;
+      x = travel * Math.cos(rotation);
+      y = travel * Math.sin(rotation);
+      z = 0;
+      opacityMultiplier = seamlessWrapOpacity(cycle);
+      break;
+    }
     case "crosscurrent": {
       const rows = Math.min(3, Math.ceil(Math.sqrt(safeCount)));
       const row = index % rows;
@@ -619,6 +643,12 @@ export function pointForGeometry(
     x = rotatedX;
     y = rotatedY;
     pathAngle += orbitRotation;
+  } else if (settings.geometry.shape === "parametric" && circleRotation !== 0) {
+    const rotationRad=circleRotation*Math.PI/180;
+    const rotatedX=x*Math.cos(rotationRad)-y*Math.sin(rotationRad);
+    y=x*Math.sin(rotationRad)+y*Math.cos(rotationRad);
+    x=rotatedX;
+    pathAngle+=rotationRad;
   }
 
   // Resize the projected path only. Keep depth, card sizes, opacity and
@@ -670,6 +700,29 @@ export function pointForGeometry(
   };
 }
 
+export function queueTransitionProgress(progress:number,step:number,transition:DialTransition):number{
+  const local=clamp(progress/step,0,1);
+  if(local===0||local===1)return local;
+  if(transition.type!=="spring"&&Array.isArray(transition.ease)&&transition.ease.length===4){
+    const [x1,y1,x2,y2]=transition.ease;
+    let t=local;
+    for(let i=0;i<12;i++){
+      const value=3*(1-t)**2*t*x1+3*(1-t)*t**2*x2+t**3;
+      const slope=3*(1-t)**2*x1+6*(1-t)*t*(x2-x1)+3*t**2*(1-x2);
+      if(Math.abs(slope)<1e-7)break;
+      t=clamp(t-(value-local)/slope,0,1);
+    }
+    return (1-t)**3*0+3*(1-t)**2*t*y1+3*(1-t)*t**2*y2+t**3;
+  }
+  return clamp(transitionProgress(local,transition),0,1);
+}
+
+function steppedCycleProgress(progress:number,slots:number,step:number,transition:DialTransition):number{
+  if(progress>=1)return 1;
+  const position=progress*slots;
+  return (Math.floor(position)+queueTransitionProgress(position%1,step,transition))/slots;
+}
+
 export function generateNodeKeyframes(
   settings: MotionSettings,
   index: number,
@@ -680,6 +733,8 @@ export function generateNodeKeyframes(
   const direction = settings.motion.direction === "clockwise" ? 1 : -1;
   const itemPhase = count > 1 ? (index / count) * TAU : 0;
   const staggerPhase = (settings.motion.stagger * index / settings.motion.duration) * TAU;
+  const slots=Math.max(1,Math.round(count*Math.abs(settings.geometry.turns||1)));
+  const queueStep=clamp(settings.motion.queueStep??1,.05,1);
   const result: GeneratedKeyframe[] = [];
 
   const positions = Array.from({ length: samples + 1 }, (_, sample) => sample / samples);
@@ -711,18 +766,32 @@ export function generateNodeKeyframes(
     }
     positions.sort((a, b) => a - b);
   }
+  if(settings.motion.queue){
+    for(let slot=0;slot<slots;slot++){
+      positions.push(slot/slots);
+      for(let sample=1;sample<12;sample++)positions.push((slot+queueStep*sample/12)/slots);
+      positions.push((slot+queueStep)/slots);
+      if(queueStep<1)positions.push((slot+1-1e-7)/slots);
+    }
+    positions.sort((a,b)=>a-b);
+  }
   for (const progress of positions) {
-    const cycleProgress = transitionProgress(progress, settings.motion.fullCycle);
+    const cycleProgress = settings.motion.queue
+      ? steppedCycleProgress(progress,slots,queueStep,settings.motion.queueEasing??defaultQueueEasing)
+      :transitionProgress(progress, settings.motion.fullCycle);
     // Falling Stack has a one-way physical action: cards must always fall
     // forward in time. Direction mirrors the vertical movement.
-    const angle = (fallingStack ? -itemPhase : itemPhase + staggerPhase) +
+    const angle = (fallingStack ? -itemPhase + staggerPhase : itemPhase + staggerPhase) +
       (fallingStack ? 1 : direction) * cycleProgress * TAU * settings.geometry.turns;
+    const point = pointForGeometry(angle, settings, index, count);
     result.push({
       time: progress * settings.motion.duration,
       ...(fallingStack ? {
         curveBoundary: Math.abs((progress * Math.max(1, count) % 1) - 0.42) < 1e-10,
       } : {}),
-      ...pointForGeometry(angle, settings, index, count),
+      ...point,
+      x: point.x + (settings.geometry.offsetX ?? 0),
+      y: point.y + (settings.geometry.offsetY ?? 0),
     });
   }
 

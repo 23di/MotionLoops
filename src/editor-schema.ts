@@ -18,6 +18,7 @@ const plane = ["radiusX", "radiusY", "circleRotation", "depth", "tilt", "rotatio
 const depthWave = ["depthWave", "depthFrequency", "depthAmplitude", "depthPhase"];
 // Engine capabilities are data. Presets can override these without editor branches.
 export const editorSchemas: Record<GeometryShape, EditorSchema> = {
+  line: { geometry: ["radiusX", "circleRotation"] },
   parametric: { geometry: [...plane, "advanced"], pathEditor: true, quick: ["geometry.circleRotation"] },
   ellipse: { geometry: [...plane, ...depthWave], pathEditor: true, quick: ["geometry.circleRotation"] },
   "custom-path": { geometry: [...plane, "customPath", ...depthWave], pathEditor: true },
@@ -42,8 +43,9 @@ export const editorSchemas: Record<GeometryShape, EditorSchema> = {
 export function editorPaths(schema: EditorSchema): Set<string> {
   return new Set(schema.controls ?? [
     "motion.duration", "motion.stagger", "motion.fullCycle",
-    "motion.radiusPulse", "motion.scalePulse", "motion.opacityPulse", "motion.depthPulse",
+    "motion.radiusPulse", "motion.scalePulse", "motion.opacityPulse", "motion.depthPulse", "motion.queueStep", "motion.queueEasing",
     "geometry.pathScale",
+    "geometry.offsetX", "geometry.offsetY",
     "geometry.shape", "geometry.dynamicScale",
     ...schema.geometry.map(key => `geometry.${key}`),
     "appearance", "other",
