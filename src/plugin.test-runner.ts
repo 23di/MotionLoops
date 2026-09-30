@@ -974,6 +974,39 @@ globalThis.figma.createRectangle=()=>{const node=makeNode("Rectangle");node.resi
   cards[0].clone=clone;
   await onMessage({type:"clear",scope:"selection"});
 }
+// Duplicated frames keep plugin data containing the original card IDs.
+// Refresh/Clear from a single duplicated card must remain in its own frame.
+{
+  const cards=[makeNode('Duplicate isolation A'),makeNode('Duplicate isolation B')];
+  parent.children=cards;cards.forEach(card=>card.parent=parent);
+  const row=freshPreset('reference-carousel-05');
+  globalThis.figma.currentPage.selection=cards;
+  await onMessage({type:'apply',settings:row});
+  const originalRoot=nodes.get(JSON.parse(cards[0].getPluginData('orbit-motion')).serviceIds[0]);
+  const originalMarkers=cards.map(card=>card.getPluginData('orbit-motion'));
+  const duplicate=figma.createFrame();duplicate.name='Duplicated frame';duplicate.resize(720,400);
+  duplicate.parent={type:'PAGE',id:'duplicate-page'};
+  duplicate.getTopLevelFrame=()=>duplicate;
+  const duplicateCards=cards.map(card=>{const n=makeNode(card.name);n.getTopLevelFrame=()=>duplicate;n.manualKeyframeTracks=cloneData(card.manualKeyframeTracks);n.setPluginData('orbit-motion',card.getPluginData('orbit-motion'));duplicate.appendChild(n);return n;});
+  const duplicateRoot=figma.createFrame();duplicateRoot.name=originalRoot.name;
+  duplicateRoot.getTopLevelFrame=()=>duplicate;
+  duplicateRoot.setPluginData('orbit-motion',originalRoot.getPluginData('orbit-motion'));duplicate.appendChild(duplicateRoot);
+  globalThis.figma.currentPage.selection=[duplicateCards[0]];
+  const start=postedMessages.length;await onMessage({type:'apply',settings:row});
+  assert(!postedMessages.slice(start).some(m=>m.kind==='error'),'Refreshing one duplicated card resolves only its local linked cards');
+  assert(nodes.has(originalRoot.id),'Duplicate Refresh retains original output');
+  assert.deepEqual(cards.map(card=>card.getPluginData('orbit-motion')),originalMarkers);
+  const copyRoot=nodes.get(JSON.parse(duplicateCards[0].getPluginData('orbit-motion')).serviceIds[0]);
+  await onMessage({type:'clear',scope:'selection'});
+  assert(!nodes.has(copyRoot.id),'Clear removes the duplicated output');
+  assert(duplicateCards.every(card=>!card.getPluginData('orbit-motion')),'Clear restores all duplicated cards');
+  assert(nodes.has(originalRoot.id),'Duplicate Clear retains original output');
+  assert.deepEqual(cards.map(card=>card.getPluginData('orbit-motion')),originalMarkers);
+  globalThis.figma.currentPage.selection=[cards[0]];
+  await onMessage({type:'clear',scope:'selection'});
+  duplicate.remove=()=>{duplicate.removed=true;nodes.delete(duplicate.id);};duplicate.remove();
+  console.log('Duplicated native frame: single-card Refresh and Clear preserve the original');
+}
 for(const preset of [...referencePresets,{...referencePresets.find(p=>p.id==="reference-carousel-05")!,label:"Queue ellipse",queueShape:"ellipse"}]){
   const cards=Array.from({length:3},(_,i)=>makeNode(`${preset.label} card ${i}`));
   for(const [index,card] of cards.entries()){card.relativeTransform=[[1,0,301+index*139],[0,1,423]];parent.insertChild(parent.children.length,card);}

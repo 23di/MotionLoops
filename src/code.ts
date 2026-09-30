@@ -387,7 +387,7 @@ function resolveTargets(scope: TargetScope, includeLocked = false): MotionNode[]
     // the previous Apply selected or left an animated container active.
     if (readOrbitMarker(node)?.role === "front") {
       const linked=readOrbitMarker(node)?.referenceSourceIds;
-      if(linked?.length){const marked=findMarkedPageNodes();for(const source of marked){if(linked.includes(source.id)||(readOrbitMarker(source)?.role==="front"&&sameReferenceGroup(node,source)))expanded.push(source);}}
+      if(linked?.length){const marked=findMarkedPageNodes();for(const source of marked){if(readOrbitMarker(source)?.role==="front"&&sameReferenceGroup(node,source))expanded.push(source);}}
       else expanded.push(node);
     } else if (scope === "deep") {
       expanded.push(...collectDescendants(node, true, includeLocked));
@@ -800,6 +800,10 @@ async function findBackCopies(
         claimedServiceIds?.has(candidate.id)
       ) return;
       const marker = readOrbitMarker(candidate);
+      // Duplicated native compositions retain the original source IDs. A
+      // complete group in another frame owns its own copies, even if IDs match.
+      if(marker?.referenceSourceIds?.length&&candidate.getTopLevelFrame()?.id!==source.getTopLevelFrame()?.id&&
+        (markedPageNodes??findMarkedPageNodes()).some(node=>readOrbitMarker(node)?.role==="front"&&sameReferenceGroup(candidate,node)))return;
       const sameNamedService = candidate.name.startsWith(`${source.name} · Orbit Depth `) &&
         isServiceNamed(candidate);
       if (
@@ -1955,8 +1959,7 @@ async function clearMotion(_scope: TargetScope, recoveryAttempt=false): Promise<
   }
   // One reference animation is a shared composition. Clearing any linked card
   // must restore every original, rather than removing the shared output only.
-  const linkedIds=new Set([...scopedNodes.values()].flatMap(node=>readOrbitMarker(node)?.referenceSourceIds??[]));
-  for(const node of markedPageNodes)if((linkedIds.has(node.id)||[...scopedNodes.values()].some(source=>sameReferenceGroup(source,node)))&&isMotionNode(node)&&!isOrbitService(node))motionInScope.set(node.id,node);
+  for(const node of markedPageNodes)if([...scopedNodes.values()].some(source=>sameReferenceGroup(source,node))&&isMotionNode(node)&&!isOrbitService(node))motionInScope.set(node.id,node);
 
   const orbitTargetsById = new Map<string, MotionNode>();
   for (const node of motionInScope.values()) {
