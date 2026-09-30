@@ -1080,7 +1080,7 @@ function App() {
     appliedPreset: null,
   });
   const [status, setStatus] = useState<{
-    kind: "success" | "error";
+    kind: "success" | "error" | "warning";
     message: string;
     diagnostics?: string;
   } | null>(null);
@@ -1212,7 +1212,7 @@ function App() {
         if (message.diagnostics) setLastDiagnostics(message.diagnostics);
         setOperation(null);
         setDiagnosticsCopied(false);
-        setStatus(message.kind === "error" ? message : null);
+        setStatus(message.kind === "error" ? message : message.warning ? {kind:"warning",message:message.warning,diagnostics:message.diagnostics} : null);
       }
     };
     send({ type: "refresh-selection" });

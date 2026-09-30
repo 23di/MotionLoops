@@ -10,6 +10,8 @@ import { fromMotionDocument, toMotionDocument, validateMotionDocument } from "./
 import { compileReference } from "./reference-tracks";
 import { editableVisibleMax } from "./motion-capabilities";
 import { recipeKey, recipePresentation } from "./preset-presentation";
+import { prepareNestedMotion, applyNestedMotionBatch, type NestedMotionJob, restoreNestedMotion, nestedShift,
+  captureNestedState, nestedMotionNotice, mainCardStarts, mainPoseTime, loopRewindTimes, mainCardOccurrences } from "./nested-motion";
 import type {
   MotionSettings,
   PresetId,
@@ -616,6 +618,38 @@ function sampledFloatTrack(
   return sparseFloatTrack(baseValue, frames, value, Math.max(1e-7, range * 1e-5), steppedState);
 }
 
+// Gate the artwork itself, not just its parent. The live Motion player can
+// retain an old parent transform/opacity after reparenting a cloned node.
+// Linear samples preserve depth fades while HOLD keys protect ownership jumps.
+function referenceArtworkOpacityTrack(frames:ReturnType<typeof compileReference>[number]["frames"],opacity:number):ManualKeyframeTrackInput{
+  const keys: Array<{timelinePosition:number;easing:MotionEasing;value:{type:"FLOAT";value:number}}> = [];
+  for(let i=0;i<frames.length;i++){
+    const frame=frames[i],previousFrame=frames[i-1];
+    const key={timelinePosition:Math.round(frame.time*1e6)/1e6,
+      easing:previousFrame&&Boolean(previousFrame.opacity)!==Boolean(frame.opacity)?holdEasing:linearEasing,
+      value:{type:"FLOAT" as const,value:frame.opacity>0?opacity*(1-frame.shade)*frame.alpha:0}};
+    const previous=keys[keys.length-1];
+    if(previous&&previous.timelinePosition===key.timelinePosition){
+      if(previous.value.value!==key.value.value){
+        // Preserve the incoming fade immediately before a native microsecond
+        // handoff; otherwise HOLD freezes the whole preceding sample interval.
+        previous.timelinePosition=key.timelinePosition-1e-6;
+        key.easing=holdEasing;
+        keys.push(key);
+      }else{
+        key.easing=previous.easing;
+        keys[keys.length-1]=key;
+      }
+    }else{
+      const before=keys[keys.length-2];
+      if(before&&before.value.type==="FLOAT"&&previous.value.type==="FLOAT"&&
+        before.value.value===previous.value.value&&previous.value.value===key.value.value&&key.easing.type!=="HOLD")keys.pop();
+      keys.push(key);
+    }
+  }
+  return {baseValue:{type:"FLOAT",value:0},keyframes:keys};
+}
+
 function autoLayoutCenterOffset(node: MotionNode): { x: number; y: number } | null {
   const frame = node.getTopLevelFrame();
   const parent = tryGetParent(node);
@@ -883,6 +917,7 @@ async function ensureBackCopies(
   count: number,
   markedPageNodes: ReadonlyArray<SceneNode>,
   claimedServiceIds: Set<string>,
+  refreshNestedContent = false,
 ): Promise<{ nodeIds: string[]; createdIds: string[]; surplusIds: string[] }> {
   const sourceId = source.id;
   const sourceName = source.name;
@@ -920,7 +955,7 @@ async function ensureBackCopies(
   const nodeIds: string[] = [];
   const createdIds: string[] = [];
   for (let layer = 0; layer < count; layer += 1) {
-    const reusableId = reusableIds[layer];
+    const reusableId = refreshNestedContent ? undefined : reusableIds[layer];
     const reusableNode = reusableId ? await figma.getNodeByIdAsync(reusableId) : null;
     let copy = reusableNode && reusableNode.type !== "DOCUMENT" && reusableNode.type !== "PAGE" &&
       isMotionNode(reusableNode)
@@ -1002,7 +1037,7 @@ async function ensureBackCopies(
   }
   // Surplus removal is deliberately deferred until every replacement track
   // has been written successfully. Otherwise one failing setter leaves holes.
-  return { nodeIds, createdIds, surplusIds: reusableIds.slice(count) };
+  return { nodeIds, createdIds, surplusIds: refreshNestedContent ? reusableIds : reusableIds.slice(count) };
 }
 
 function depthBand(frame: ReturnType<typeof generateNodeKeyframes>[number], depth: number, count: number): number {
@@ -1200,15 +1235,22 @@ async function applyReferenceMotion(settings: MotionSettings): Promise<void> {
   for(const target of targets){
     if(!hasAllReferenceSources(target,targets))throw new Error("Select and unlock all cards of this animation before refreshing it.");
   }
+  const nested=await prepareNestedMotion(targets,settings.other.startOnEntry===true);
+  const restoreNestedSources=await captureNestedState(targets);
   const snapshots=targets.map(node=>({id:node.id,name:node.name,width:node.width,height:node.height,opacity:sourceBaseOpacity(node),previousOpacity:"opacity" in node?node.opacity:1,marker:node.getPluginData(orbitMarkerKey),tracks:animatedFields.flatMap(name=>{const track=node.manualKeyframeTracks[name];return track?[{name,track:JSON.parse(JSON.stringify({baseValue:track.baseValue,keyframes:track.keyframes})) as ManualKeyframeTrackInput}]:[]})}));
   const instances=compileReference(settings,snapshots,width,height);
-  logDiagnostic("reference.compiled", { sourceCount: snapshots.length, instanceCount: instances.length });
+  const playbackInstances=instances.map(instance=>({...instance,
+    frames:instance.frames.map(frame=>({...frame,opacity:frame.opacity*frame.alpha,x:frame.x-Number(settings.reference?.offsetX??0)*width/100,y:frame.y-Number(settings.reference?.offsetY??0)*height/100}))}));
+  const mainStarts=mainCardStarts(playbackInstances,
+    snapshots.length,settings.motion.duration,referenceDefinition(settings)?.mode==="rfStack"?"front":"center");
+  const occurrences=mainCardOccurrences(playbackInstances,snapshots.length,settings.motion.duration,referenceDefinition(settings)?.mode==="rfStack"?"front":"center");
+  logDiagnostic("reference.compiled", { sourceCount: snapshots.length, instanceCount: instances.length, mainCardStarts: settings.other.startOnEntry ? mainStarts : undefined });
   if(!instances.length)throw new Error("This composition produced no visible cards. Adjust the Row settings before applying.");
   const visibility=new Map(targets.map(node=>[node.id,{previous:node.visible,base:readOrbitMarker(node)?.baseVisible??node.visible}]));
   const oldServices=new Set<string>();
   const marked=findMarkedPageNodes();
   for(const node of targets)for(const copy of await findBackCopies(node,true,marked))oldServices.add(copy.id);
-  const root=figma.createFrame();root.name=`${presetLabel} · Orbit native (service)`;root.resize(width,height);root.fills=[];root.clipsContent=true;
+  const root=figma.createFrame();root.visible=false;root.name=`${presetLabel} · Orbit native (service)`;root.resize(width,height);root.fills=[];root.clipsContent=true;
   const rootId=root.id;
   // Build the entire replacement before touching originals or old services.
   try {
@@ -1225,9 +1267,10 @@ async function applyReferenceMotion(settings: MotionSettings): Promise<void> {
     placed.setPluginData(orbitMarkerKey,JSON.stringify({version:2,preset:settings.preset,role:"back",service:true,sourceId:sourceIds[0],referenceSourceIds:sourceIds} satisfies OrbitMarker));
     const timelines=new Set<string>();
     const slotIds:string[]=[];
+    const nestedJobs:NestedMotionJob[]=[];
     for(const instance of instances){
       const source=snapshots[instance.source];
-      const slot=figma.createFrame();slot.name=`${source.name} · layer ${instance.layer+1}`;slot.resize(instance.baseWidth,instance.baseHeight);slot.fills=[];slot.clipsContent=true;
+      const slot=figma.createFrame();slot.visible=false;slot.name=`${source.name} · layer ${instance.layer+1}`;slot.resize(instance.baseWidth,instance.baseHeight);slot.fills=[];slot.clipsContent=true;
       const slotId=slot.id;
       slotIds.push(slotId);
       (await figma.getNodeByIdAsync(rootId) as FrameNode).appendChild(slot);
@@ -1240,12 +1283,19 @@ async function applyReferenceMotion(settings: MotionSettings): Promise<void> {
       }
       const freshSource=await figma.getNodeByIdAsync(source.id);
       if(!freshSource||freshSource.type==="DOCUMENT"||freshSource.type==="PAGE")throw new Error("A source card became unavailable.");
-      const clone=freshSource.clone();const cloneId=clone.id;
+      // A visible clone is first inserted beside its source. Native Motion can
+      // retain that transient drawing after the clone is reparented, until the
+      // file tab is reopened. Keep it hidden from its very first insertion.
+      const sourceWasVisible=freshSource.visible;
+      let clone:SceneNode;
+      try{freshSource.visible=false;clone=freshSource.clone();}
+      finally{freshSource.visible=sourceWasVisible;}
+      const cloneId=clone.id;
       (await figma.getNodeByIdAsync(slotId) as FrameNode).appendChild(clone);
       const card=await figma.getNodeByIdAsync(cloneId) as SceneNode;
       if(!("opacity" in card)||!("rotation" in card)||!("rescale" in card))throw new Error("This source type cannot be used as an editable card.");
       if(isMotionNode(card)&&!clearAnimatedTracksSafely(card))throw new Error(`Could not reset motion on the copy of ${source.name}.`);
-      card.setPluginData(orbitMarkerKey,"");card.opacity=source.opacity;card.visible=visibility.get(source.id)!.base;card.rotation=0;
+      card.setPluginData(orbitMarkerKey,"");card.opacity=0;card.visible=false;card.rotation=0;
       // Native Motion proxies can lose X when Y is assigned next. Commit both
       // coordinates together so the cloned source stays inside its clipping slot.
       card.relativeTransform=[[1,0,(instance.baseWidth-card.width)/2],[0,1,(instance.baseHeight-card.height)/2]];
@@ -1257,7 +1307,10 @@ async function applyReferenceMotion(settings: MotionSettings): Promise<void> {
         card.applyManualKeyframeTrack({type:"PROPERTY",name},{baseValue:value,keyframes:[{timelinePosition:0,value,easing:{type:"HOLD"}}]});
       }
       if(instance.fill&&isMotionNode(card))for(const [name,key] of [["SCALE_X","imageScaleX"],["SCALE_Y","imageScaleY"]] as const)card.applyManualKeyframeTrack({type:"PROPERTY",name},sampledFloatTrack(1,instance.frames,frame=>(frame as typeof instance.frames[number])[key]));
-      if(isMotionNode(card))card.applyManualKeyframeTrack({type:"PROPERTY",name:"OPACITY"},sampledFloatTrack(source.opacity,instance.frames,frame=>{const native=frame as typeof instance.frames[number];return source.opacity*(1-native.shade)*native.alpha;}));
+      if(isMotionNode(card))card.applyManualKeyframeTrack({type:"PROPERTY",name:"OPACITY"},referenceArtworkOpacityTrack(instance.frames,source.opacity));
+      const nestedSource=nested[instance.source];
+      const entry=mainStarts[instance.source];
+      nestedJobs.push({rootId:cloneId,snapshot:nestedSource,shift:nestedShift(nestedSource,entry,settings.other.entryOffset??0),enabled:settings.other.startOnEntry===true,occurrences:occurrences[instance.source],offset:settings.other.entryOffset??0,loopEnd:settings.motion.duration});
       const wrapper=await figma.getNodeByIdAsync(slotId) as FrameNode;
       const wrapperX=(width-instance.baseWidth)/2,wrapperY=(height-instance.baseHeight)/2;
       wrapper.relativeTransform=[[1,0,wrapperX],[0,1,wrapperY]];
@@ -1265,7 +1318,8 @@ async function applyReferenceMotion(settings: MotionSettings): Promise<void> {
       // Motion translation is additive to the resting transform. The wrapper
       // is already centered; compiled positions are offsets from that center.
       const transforms=prepareTransformTracks(instance.frames,{x:0,y:0},true);
-      applyTracks(wrapper,instance.frames,transforms,1,frame=>frame.opacity,frame=>frame.opacity>0,true);
+      wrapper.opacity=0;
+      applyTracks(wrapper,instance.frames,transforms,0,frame=>frame.opacity,frame=>frame.opacity>0,true);
       const corner=sparseFloatTrack(0,instance.frames,frame=>(frame as typeof instance.frames[number]).radius,.01);
       for(const name of ["RECTANGLE_TOP_LEFT_CORNER_RADIUS","RECTANGLE_TOP_RIGHT_CORNER_RADIUS","RECTANGLE_BOTTOM_LEFT_CORNER_RADIUS","RECTANGLE_BOTTOM_RIGHT_CORNER_RADIUS"] as const)wrapper.applyManualKeyframeTrack({type:"PROPERTY",name},corner);
       setTimelineDurations(wrapper,settings.motion.duration,timelines);
@@ -1277,7 +1331,9 @@ async function applyReferenceMotion(settings: MotionSettings): Promise<void> {
       const slot=await figma.getNodeByIdAsync(slotIds[index]) as FrameNode;
       parent.insertChild(index,slot);
     }
+    await applyNestedMotionBatch([...nestedJobs,...snapshots.map((source,index)=>({rootId:source.id,snapshot:nested[index],shift:0,enabled:false}))]);
     for(const source of snapshots){
+      // Originals stay editable at their authored timing; only service cards play.
       const node=await figma.getNodeByIdAsync(source.id);
       if(!node||node.type==="DOCUMENT"||node.type==="PAGE"||!isMotionNode(node))throw new Error("A source card became unavailable before commit.");
       if(!clearAnimatedTracksSafely(node))throw new Error(`Could not replace motion on ${source.name}.`);
@@ -1289,7 +1345,19 @@ async function applyReferenceMotion(settings: MotionSettings): Promise<void> {
       const marker:OrbitMarker={version:2,preset:settings.preset,role:"front",baseOpacity:source.opacity,baseVisible:visibility.get(source.id)!.base,serviceIds:[rootId],referenceSourceIds:sourceIds,settings};
       node.setPluginData(orbitMarkerKey,serializeOrbitMarker(marker));setOrbitRelaunch(node,marker);
     }
-    const completed=await figma.getNodeByIdAsync(rootId);if(completed&&completed.type!=="DOCUMENT"&&completed.type!=="PAGE")trySetLocked(completed,true);
+    // Reveal only the completed subtree: no temporary source-position copies
+    // should enter the live player's render cache during construction.
+    for(let index=0;index<slotIds.length;index++){
+      const slot=await figma.getNodeByIdAsync(slotIds[index]) as FrameNode;
+      slot.visible=true;
+      const artwork=slot.children[slot.children.length-1];
+      const sourceIndex=instances[index].source;
+      artwork.visible=visibility.get(snapshots[sourceIndex].id)!.base;
+    }
+    const completed=await figma.getNodeByIdAsync(rootId);
+    if(completed&&completed.type!=="DOCUMENT"&&completed.type!=="PAGE"){
+      completed.visible=true;trySetLocked(completed,true);
+    }
   }catch(error){
     logDiagnostic("reference.write.failed", {
       rootId,
@@ -1297,6 +1365,7 @@ async function applyReferenceMotion(settings: MotionSettings): Promise<void> {
     });
     const failed=await figma.getNodeByIdAsync(rootId);if(failed&&failed.type!=="DOCUMENT"&&failed.type!=="PAGE")await removeNodeSafely(failed);
     const recoveryErrors:string[]=[];
+    try{await restoreNestedSources();}catch(recoveryError){recoveryErrors.push(`nested animation timing: ${recoveryError instanceof Error?recoveryError.message:String(recoveryError)}`);}
     for(const source of snapshots){
       try{
         const node=await figma.getNodeByIdAsync(source.id);
@@ -1307,17 +1376,19 @@ async function applyReferenceMotion(settings: MotionSettings): Promise<void> {
         }
       }catch{recoveryErrors.push(source.name);}
     }
-    if(recoveryErrors.length)throw new Error(`Update failed; could not restore ${recoveryErrors.join(", ")}. Undo this operation in Figma.`);
+    if(recoveryErrors.length)throw new Error(`Update failed: ${error instanceof Error?error.message:String(error)}. Could not restore ${recoveryErrors.join(", ")}. Undo this operation in Figma.`);
     throw error;
   }
   for(const id of oldServices){const node=await figma.getNodeByIdAsync(id);if(node&&node.type!=="DOCUMENT"&&node.type!=="PAGE")await removeNodeSafely(node);}
   logDiagnostic("reference.completed", { rootId, removedOldServices: oldServices.size });
   await captureDiagnosticAfter();
-  post({type:"result",kind:"success",message:`${presetLabel}: ${targets.length} cards, ${instances.length} editable native instances.`});
+  post({type:"result",kind:"success",message:`${presetLabel}: ${targets.length} cards, ${instances.length} editable native instances.`,warning:nestedMotionNotice(nested).trim()||undefined});
   post({type:"selection",selection:selectionSummary()});
 }
 
 async function applyMotion(settings: MotionSettings): Promise<void> {
+  if(settings.other.startOnEntry!==undefined&&typeof settings.other.startOnEntry!=="boolean"||
+    !Number.isFinite(settings.other.entryOffset??0))throw new Error("Invalid animation entry timing.");
   const nativeDefinition = referenceDefinition(settings);
   if (figma.currentPage.selection.some((node) => node.type === "SECTION")) {
     throw new Error(nativeDefinition
@@ -1335,6 +1406,8 @@ async function applyMotion(settings: MotionSettings): Promise<void> {
   if(nativeDefinition)return applyReferenceMotion(settings);
   // Native compositions must not be mistaken for reusable depth-copy cards.
   const replacementTargets=resolveTargets(settings.other.scope);
+  const nested=await prepareNestedMotion(replacementTargets,settings.other.startOnEntry===true);
+  const nestedById=new Map(replacementTargets.map((node,index)=>[node.id,nested[index]]));
   const referenceTargets=replacementTargets.filter(node=>readOrbitMarker(node)?.referenceSourceIds?.length);
   for(const node of referenceTargets)if(!hasAllReferenceSources(node,replacementTargets))throw new Error("Unlock all cards of the native animation before replacing it.");
   const referenceRoots=new Set(referenceTargets.flatMap(node=>readOrbitMarker(node)?.serviceIds??[]));
@@ -1354,6 +1427,7 @@ async function applyMotion(settings: MotionSettings): Promise<void> {
     const copies = await findBackCopies(node, true, markedPageNodes);
     const copyIds = copies.map((copy) => copy.id);
     const marker = readOrbitMarker(node);
+    await restoreNestedMotion(node);
     if (!clearAnimatedTracksSafely(node)) continue;
     restoreSourceOpacity(node, marker);
     removeManagedFrontShadow(node);
@@ -1441,6 +1515,11 @@ async function applyMotion(settings: MotionSettings): Promise<void> {
       : { x: 0, y: 0 };
     const preserveSamples = settings.geometry.shape === "falling-stack";
     let transformTracks = prepareTransformTracks(frames, centerOffset, preserveSamples);
+    const nestedSource=nestedById.get(targetId);
+    const entry=nestedSource?.layers.length&&settings.other.startOnEntry
+      ?mainPoseTime(frames,settings.motion.duration):0;
+    const entryShift=nestedSource?nestedShift(nestedSource,entry,settings.other.entryOffset??0):0;
+    const rewindAt=loopRewindTimes([{source:0,frames}],1,settings.motion.duration,[entry])[0];
     const baseOpacity = sourceBaseOpacity(node);
     const targetParent = tryGetParent(node);
     const targetParentId = hasSceneChildren(targetParent) ? targetParent.id : null;
@@ -1459,6 +1538,7 @@ async function applyMotion(settings: MotionSettings): Promise<void> {
           throw new Error("The source layer became unavailable.");
         }
 
+        const nestedJobs:NestedMotionJob[]=[];
         let backCopyIds: string[] = [];
         let surplusIds: string[] = [];
         if (useDepthLayers) {
@@ -1467,6 +1547,7 @@ async function applyMotion(settings: MotionSettings): Promise<void> {
             layerCount - 1,
             markedPageNodes,
             claimedServiceIds,
+            Boolean(nestedSource?.layers.length || settings.other.startOnEntry && hasChildren(freshSource)),
           );
           backCopyIds = ensured.nodeIds;
           claimedAttemptIds = [...backCopyIds];
@@ -1521,6 +1602,7 @@ async function applyMotion(settings: MotionSettings): Promise<void> {
                 : (frame) => depthBand(frame, fittedSettings.geometry.depth, layerCount) === layer,
               preserveSamples,
             );
+            if(nestedSource)nestedJobs.push({rootId:copyId,snapshot:nestedSource,shift:entryShift,enabled:settings.other.startOnEntry===true,rewindAt,loopEnd:settings.motion.duration});
             resolvedCopy.setPluginData(orbitMarkerKey, JSON.stringify({
               version: 2,
               preset: settings.preset,
@@ -1584,6 +1666,8 @@ async function applyMotion(settings: MotionSettings): Promise<void> {
           preserveSamples,
         );
         setTimelineDurations(sourceForTracks, settings.motion.duration, touchedTimelines);
+        if(nestedSource)nestedJobs.push({rootId:targetId,snapshot:nestedSource,shift:entryShift,enabled:settings.other.startOnEntry===true,rewindAt,loopEnd:settings.motion.duration});
+        await applyNestedMotionBatch(nestedJobs);
 
         const sourceMarker = {
           version: 2,
@@ -1836,9 +1920,10 @@ async function applyMotion(settings: MotionSettings): Promise<void> {
   post({
     type: "result",
     kind: "success",
-    message: failures.length > 0
+    message: (failures.length > 0
       ? `Animated ${changed.length} layers; ${failures.length} could not be changed.`
-      : `Animated ${changed.length} layer${changed.length === 1 ? "" : "s"}.`,
+      : `Animated ${changed.length} layer${changed.length === 1 ? "" : "s"}.`),
+    warning:nestedMotionNotice(nested).trim()||undefined,
   });
   sendSelection();
 }
@@ -1851,7 +1936,9 @@ async function clearMotion(_scope: TargetScope, recoveryAttempt=false): Promise<
   const scopedNodes = new Map<string, SceneNode>();
   const visit = (node: SceneNode): void => {
     scopedNodes.set(node.id, node);
-    if (isOrbitService(node)) return;
+    // A selected animated card can contain its own authored Orbit animations.
+    // Clear the outer composition without recursively clearing those children.
+    if (isOrbitService(node)||readOrbitMarker(node)?.role==="front") return;
     if (hasChildren(node)) {
       for (const child of node.children) visit(child);
     }
@@ -1947,6 +2034,7 @@ async function clearMotion(_scope: TargetScope, recoveryAttempt=false): Promise<
       const backCopies = await findBackCopies(resolved, true, markedPageNodes);
       const backCopyIds = backCopies.map((copy) => copy.id);
       const marker = readOrbitMarker(resolved);
+      await restoreNestedMotion(resolved);
       if (!clearAnimatedTracksSafely(resolved)) {
         for (const copyId of backCopyIds) protectedServiceIds.add(copyId);
         failures += 1;

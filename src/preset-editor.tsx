@@ -48,13 +48,19 @@ export function PresetEditor({settings,onChange,theme,panelId,shapeEditor,diagno
     "other.scope","other.centerBeforeApply","other.serviceLayers",
     "other.copyJson","other.pasteJson","other.resetSettings",
   ].includes(control.path));
+  const entryControls=leaves.filter(control=>control.path==="other.startOnEntry"||
+    settings.other.startOnEntry&&control.path==="other.entryOffset").map(control=>({...control,
+      label:control.path==="other.startOnEntry"?"Start when card is main":"Offset (s)",
+      ...(control.path==="other.entryOffset"?{min:-5,max:5,step:.01}:{})}));
   const renderControls=(controls:ControlMeta[])=>controls.map(control=>{
     const sizeLocked=adaptiveEnabled&&["parameters.cardSize","parameters.shape_cardSize"].includes(control.path);
-    return <div key={control.path} className={[control.path==="parameters.easing"?"motion-easing":"",sizeLocked?"orbit-control-disabled":""].filter(Boolean).join(" ")||undefined}
+    return <div key={control.path} className={[control.path==="parameters.easing"?"motion-easing":"",control.path==="other.entryOffset"?"entry-offset":"",sizeLocked?"orbit-control-disabled":""].filter(Boolean).join(" ")||undefined}
+      title={control.path==="other.startOnEntry"?"Start animations inside each card when it becomes the front or central card.":control.path==="other.entryOffset"?"Negative starts earlier; positive starts later. Double-press the handle to reset to zero.":undefined}
       inert={sizeLocked} aria-disabled={sizeLocked}>
     {control.type==="slider"&&!(["rfStack","rfCarousel"].includes(document.model)&&control.path==="parameters.visible")
       ?<DialKitRangeOverride panelId={panelId} control={control} values={values}
-      resetValue={typeof presetDefaults[control.path]==="number"?presetDefaults[control.path] as number:undefined}/>:
+      symmetric={control.path==="other.entryOffset"}
+      resetValue={control.path==="other.entryOffset"?0:typeof presetDefaults[control.path]==="number"?presetDefaults[control.path] as number:undefined}/>:
       control.type==="transition"?<TransitionControl panelId={panelId} path={control.path} label={control.label}
       value={values[control.path] as never} hideDuration onChange={value=>DialStore.updateValue(panelId,control.path,value)}/>:
       <ControlRenderer panelId={panelId} controls={[control]} values={values}/>}
@@ -87,6 +93,7 @@ export function PresetEditor({settings,onChange,theme,panelId,shapeEditor,diagno
               ...(selectedAnimation==="custom"?[{value:"custom",label:"Custom"}]:[])]}
             onChange={value=>onChange(applyAnimation(settings,value))}/>}
           {section.id==="other"?renderOther():renderControls(controlsFor(section.bindings.filter(binding=>!binding.advanced)))}
+          {section.id==="motion"&&<div className="entry-timing-controls">{renderControls(entryControls)}</div>}
           {section.bindings.some(binding=>binding.advanced)&&<Folder title="Advanced" defaultOpen={false}>
             {renderControls(controlsFor(section.bindings.filter(binding=>binding.advanced)))}
           </Folder>}

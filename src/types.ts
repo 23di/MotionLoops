@@ -135,6 +135,8 @@ export interface MotionSettings {
     frontShadow: number;
   };
   other: {
+    startOnEntry?: boolean;
+    entryOffset?: number;
     centerBeforeApply: boolean;
     serviceLayers: ServiceLayerCount;
     depthSplit?: boolean;
@@ -172,4 +174,4 @@ export type UiToPluginMessage =
 
 export type PluginToUiMessage =
   | { type: "selection"; selection: SelectionSummary }
-  | { type: "result"; kind: "success" | "error"; message: string; diagnostics?: string };
+  | { type: "result"; kind: "success" | "error"; message: string; diagnostics?: string; warning?: string };

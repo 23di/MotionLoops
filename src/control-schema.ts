@@ -141,6 +141,8 @@ export const controls = {
   },
   other: {
     _collapsed: true,
+    startOnEntry: false,
+    entryOffset: [0, -5, 5, 0.01],
     centerBeforeApply: true,
     serviceLayers: {
       type: "select",

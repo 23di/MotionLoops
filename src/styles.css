@@ -802,6 +802,8 @@ main {
 .other-controls { display: flex; flex-direction: column; gap: 8px; }
 .other-settings { display: flex; flex-direction: column; gap: 8px; }
 .other-settings > div { min-width: 0; }
+.entry-timing-controls { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.entry-offset .dialkit-slider::after { content: ""; position: absolute; left: 50%; top: 50%; height: 10px; width: 1px; transform: translateY(-50%); background: var(--dial-text-tertiary); pointer-events: none; }
 .other-clipboard-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 0; }
 .other-clipboard-row > div { min-width: 0; }
 .other-clipboard-row button { width: 100%; min-height: 32px; padding: 6px 10px; }
@@ -816,3 +818,5 @@ main {
 .library-links a:hover { color: var(--orbit-text); text-decoration: underline; }
 .saved-gallery { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-bottom: 8px; }
 .saved-gallery h2 { font-size: 12px; font-weight: 500; }
+
+.status.warning { color: var(--figma-color-text-warning, #c78119); }

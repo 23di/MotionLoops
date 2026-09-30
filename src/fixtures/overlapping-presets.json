@@ -1,0 +1,254 @@
+{
+  "styles": [
+    {
+      "id": "preset-0",
+      "duration": 0.8754821419715881,
+      "timelineOffset": 0
+    },
+    {
+      "id": "preset-1",
+      "duration": 1.8016775846481323,
+      "timelineOffset": 0.599303
+    },
+    {
+      "id": "preset-2",
+      "duration": 0.8754821419715881,
+      "timelineOffset": 2.124801
+    },
+    {
+      "id": "preset-3",
+      "duration": 0.3306611180305481,
+      "timelineOffset": 0
+    },
+    {
+      "id": "preset-4",
+      "duration": 0.3306611180305481,
+      "timelineOffset": 2.669622
+    }
+  ],
+  "animations": {
+    "OPACITY": {
+      "baseValue": {
+        "type": "FLOAT",
+        "value": 1
+      },
+      "timelineDuration": 3,
+      "tracks": [
+        {
+          "id": "OPACITY-0",
+          "animationPreset": {
+            "id": "preset-3"
+          },
+          "keyframeOperation": "SCALE",
+          "keyframes": [
+            {
+              "timelinePosition": 0,
+              "easing": {
+                "type": "CUSTOM_CUBIC_BEZIER",
+                "easingFunctionCubicBezier": {
+                  "x1": 0.5,
+                  "y1": 0,
+                  "x2": 0.5,
+                  "y2": 1
+                }
+              },
+              "value": {
+                "type": "FLOAT",
+                "value": 0
+              }
+            },
+            {
+              "timelinePosition": 0.330661,
+              "easing": {
+                "type": "CUSTOM_CUBIC_BEZIER",
+                "easingFunctionCubicBezier": {
+                  "x1": 0.5,
+                  "y1": 0,
+                  "x2": 0.5,
+                  "y2": 1
+                }
+              },
+              "value": {
+                "type": "FLOAT",
+                "value": 1
+              }
+            }
+          ]
+        },
+        {
+          "id": "OPACITY-1",
+          "animationPreset": {
+            "id": "preset-4"
+          },
+          "keyframeOperation": "SCALE",
+          "keyframes": [
+            {
+              "timelinePosition": 0,
+              "easing": {
+                "type": "CUSTOM_CUBIC_BEZIER",
+                "easingFunctionCubicBezier": {
+                  "x1": 0.5,
+                  "y1": 0,
+                  "x2": 0.5,
+                  "y2": 1
+                }
+              },
+              "value": {
+                "type": "FLOAT",
+                "value": 1
+              }
+            },
+            {
+              "timelinePosition": 0.330661,
+              "easing": {
+                "type": "CUSTOM_CUBIC_BEZIER",
+                "easingFunctionCubicBezier": {
+                  "x1": 0.5,
+                  "y1": 0,
+                  "x2": 0.5,
+                  "y2": 1
+                }
+              },
+              "value": {
+                "type": "FLOAT",
+                "value": 0
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "TRANSLATION_X": {
+      "baseValue": {
+        "type": "FLOAT",
+        "value": 80
+      },
+      "timelineDuration": 3,
+      "tracks": [
+        {
+          "id": "TRANSLATION_X-0",
+          "animationPreset": {
+            "id": "preset-0"
+          },
+          "keyframeOperation": "OFFSET",
+          "keyframes": [
+            {
+              "timelinePosition": 0,
+              "easing": {
+                "type": "CUSTOM_CUBIC_BEZIER",
+                "easingFunctionCubicBezier": {
+                  "x1": 0.15000000596046448,
+                  "y1": 0.949999988079071,
+                  "x2": 0.5,
+                  "y2": 1
+                }
+              },
+              "value": {
+                "type": "FLOAT",
+                "value": -130
+              }
+            },
+            {
+              "timelinePosition": 0.875482,
+              "easing": {
+                "type": "CUSTOM_CUBIC_BEZIER",
+                "easingFunctionCubicBezier": {
+                  "x1": 0.15000000596046448,
+                  "y1": 0.949999988079071,
+                  "x2": 0.5,
+                  "y2": 1
+                }
+              },
+              "value": {
+                "type": "FLOAT",
+                "value": -10
+              }
+            }
+          ]
+        },
+        {
+          "id": "TRANSLATION_X-1",
+          "animationPreset": {
+            "id": "preset-1"
+          },
+          "keyframeOperation": "OFFSET",
+          "keyframes": [
+            {
+              "timelinePosition": 0,
+              "easing": {
+                "type": "LINEAR",
+                "easingFunctionCubicBezier": {
+                  "x1": 0,
+                  "y1": 0,
+                  "x2": 1,
+                  "y2": 1
+                }
+              },
+              "value": {
+                "type": "FLOAT",
+                "value": 0
+              }
+            },
+            {
+              "timelinePosition": 1.801678,
+              "easing": {
+                "type": "LINEAR",
+                "easingFunctionCubicBezier": {
+                  "x1": 0,
+                  "y1": 0,
+                  "x2": 1,
+                  "y2": 1
+                }
+              },
+              "value": {
+                "type": "FLOAT",
+                "value": 20
+              }
+            }
+          ]
+        },
+        {
+          "id": "TRANSLATION_X-2",
+          "animationPreset": {
+            "id": "preset-2"
+          },
+          "keyframeOperation": "OFFSET",
+          "keyframes": [
+            {
+              "timelinePosition": 0,
+              "easing": {
+                "type": "CUSTOM_CUBIC_BEZIER",
+                "easingFunctionCubicBezier": {
+                  "x1": 0.5,
+                  "y1": 0,
+                  "x2": 0.8500000238418579,
+                  "y2": 0.05000000074505806
+                }
+              },
+              "value": {
+                "type": "FLOAT",
+                "value": 0
+              }
+            },
+            {
+              "timelinePosition": 0.875482,
+              "easing": {
+                "type": "CUSTOM_CUBIC_BEZIER",
+                "easingFunctionCubicBezier": {
+                  "x1": 0.5,
+                  "y1": 0,
+                  "x2": 0.8500000238418579,
+                  "y2": 0.05000000074505806
+                }
+              },
+              "value": {
+                "type": "FLOAT",
+                "value": 120
+              }
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

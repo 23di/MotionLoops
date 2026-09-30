@@ -34,11 +34,22 @@ const oraclePresets=referencePresets.filter(p=>p.mode!=="motif"&&p.mode!=="rfCar
 for(const preset of oraclePresets)for(const count of [2,5,9])for(const [width,height] of [[720,400],[400,720],[3987,2813]]){
   const settings=catalog.freshPreset(preset.id),images=Array.from({length:count},(_,id)=>({id,width:120+id*35,height:160+id*7}));
   const params={...settings.reference,count,cornerRadius:0};
+  // The plugin deliberately caps Stack perspective and visible-card count.
+  // Compare the source painter within that range and apply the same output
+  // visibility policy; every retained card must still match numerically.
+  if(preset.mode==="rfStack")params.perspective=Math.min(100,params.perspective);
   if(preset.mode==="rfCarousel")for(const key of ["planeSize","gap"])params[key]=Math.round(params[key]*10.8*1e10)/1e10;
   const rawDuration=preset.mode==="rfCarousel"?(params.duration+count*params.stagger+params.delay+params.stagger)*params.cycles*count:preset.mode==="rfStack"?(params.duration+params.delay)*count*(params.cycles??1):preset.mode==="rfScale"?count*params.stagger*(params.cycles??1):params.duration*(params.cycles??1);
   for(let frame=0;frame<160;frame++){
     const seconds=frame/160*settings.motion.duration,phase=seconds/settings.motion.duration,ctx=record();oracle(ctx,width/height*1080,1080,phase*Math.round(rawDuration*1e5)/1e5,preset.mode,params,images,{sx:0,sy:0,ex:1,ey:1,h1x:.86,h1y:.14,h2x:.14,h2y:.86});
     for(const card of ctx.cards)for(const key of ["x","y","width","height","radius"])card[key]*=height/1080;
+    if(preset.mode==="rfStack"&&ctx.cards.length>params.visible){
+      const center=(.43+.544)*height/2+(params.offsetY??0)*height/100;
+      const nearest=ctx.cards.map((card,index)=>({card,index}))
+        .sort((a,b)=>Math.abs(a.card.y-center)-Math.abs(b.card.y-center))
+        .slice(0,params.visible).sort((a,b)=>a.index-b.index);
+      ctx.cards.splice(0,ctx.cards.length,...nearest.map(({card})=>card));
+    }
     const actual=engine.referenceScene(settings,images,width,height,seconds);
     assert.equal(actual.length,ctx.cards.length,`${preset.label} count at ${phase}`);
     for(let i=0;i<actual.length;i++)for(const key of ["source","x","y","width","height","rotation","radius"]){const error=Math.abs(actual[i][key]-ctx.cards[i][key]);assert(error<1e-6,`${preset.label} ${count} ${width}×${height} phase ${phase} card ${i} ${key}: ${actual[i][key]} vs ${ctx.cards[i][key]}`);}

@@ -506,5 +506,5 @@ for(const [key,value] of Object.entries({cycleDuration:6,stagger:0,radiusPulse:0
   turns:1,rotation:0,orient3d:true,cardSize:0,frontScale:124,backScale:52,backOpacity:25,yAmplitude:.65}))
   assert.equal(orbit04.parameters[key],value,"Orbit 04 exact setting: "+key);
 assert.deepEqual(orbit04.parameters.easing,{type:"easing",duration:1,ease:[.17,.96,.68,.62]});
-assert.deepEqual(orbit04.other,{centerBeforeApply:true,serviceLayers:"2",scope:"selection"});
+assert.deepEqual(orbit04.other,{centerBeforeApply:true,serviceLayers:"2",scope:"selection",startOnEntry:false,entryOffset:0});
 assert.deepEqual(toMotionDocument(fromMotionDocument(validateMotionDocument(orbit04))),orbit04,"Orbit 04 precision survives reload");

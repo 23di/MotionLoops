@@ -6,9 +6,9 @@ import {ControlRenderer,DialStore,type ControlMeta} from "dialkit";
  * External DialKit shim: keep its slider, input, styling and pointer handling.
  * Bypass only the input's upper clamp; restore the normal range on scrubbing.
  */
-export function DialKitRangeOverride({panelId,control,values,resetValue}:{
+export function DialKitRangeOverride({panelId,control,values,resetValue,symmetric=false}:{
   panelId:string;control:ControlMeta;values:ReturnType<typeof DialStore.getValues>;
-  resetValue?:number;
+  resetValue?:number;symmetric?:boolean;
 }){
   const [revision,setRevision]=useState(0);
   const committing=useRef(false);
@@ -18,12 +18,13 @@ export function DialKitRangeOverride({panelId,control,values,resetValue}:{
     if(committing.current)return;
     committing.current=true;
     const raw=input.value.trim(),next=Number(raw.replace(",","."));
-    if(raw&&Number.isFinite(next)&&next>=min)DialStore.updateValue(panelId,control.path,next);
+    if(raw&&Number.isFinite(next)&&(symmetric||next>=min))DialStore.updateValue(panelId,control.path,next);
     setRevision(revision=>revision+1); // close the stock input without its clamping submit
     queueMicrotask(()=>{committing.current=false;});
   };
   const resetRange=()=>{
     if(value>cap)flushSync(()=>DialStore.updateValue(panelId,control.path,cap));
+    else if(symmetric&&value<min)flushSync(()=>DialStore.updateValue(panelId,control.path,min));
   };
   const hitsHandle=(target:EventTarget|null,x:number,y:number)=>{
     const slider=target instanceof Element?target.closest(".dialkit-slider"):null;
@@ -45,7 +46,7 @@ export function DialKitRangeOverride({panelId,control,values,resetValue}:{
           setRevision(revision=>revision+1);
           queueMicrotask(()=>{committing.current=false;});
         }
-      }else if(["ArrowLeft","ArrowRight","ArrowUp","ArrowDown","Home","End","PageUp","PageDown"].includes(event.key)&&value>cap){
+      }else if(["ArrowLeft","ArrowRight","ArrowUp","ArrowDown","Home","End","PageUp","PageDown"].includes(event.key)&&(value>cap||symmetric&&value<min)){
         event.preventDefault();event.stopPropagation();resetRange();
       }
     }}
@@ -71,6 +72,7 @@ export function DialKitRangeOverride({panelId,control,values,resetValue}:{
       }else handlePress.current=null;
       if(!(event.target as Element).closest(".dialkit-slider-value, .dialkit-slider-input"))resetRange();
     }}>
-    <ControlRenderer key={revision} panelId={panelId} controls={[{...control,max:Math.max(cap,value)}]} values={values}/>
+    <ControlRenderer key={revision} panelId={panelId} controls={[{...control,
+      ...(symmetric?{min:-Math.max(cap,Math.abs(min),Math.abs(value)),max:Math.max(cap,Math.abs(min),Math.abs(value))}:{max:Math.max(cap,value)})}]} values={values}/>
   </div>;
 }

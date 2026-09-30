@@ -133,6 +133,7 @@ function makeNode(name: string): any {
     setRelaunchData: (data: Record<string, string>) => { relaunchData = { ...data }; },
     getRelaunchData: () => ({ ...relaunchData }),
     applyManualKeyframeTrack(field: { name: string }, track: unknown) {
+      assert.notEqual(field.name,"","Public Motion rejects unnamed properties");
       if(remapTreeOnTrackWriteNodeId===this.id){
         remapTreeOnTrackWriteNodeId=null;
         remapAttachedTreeIds();
@@ -161,9 +162,13 @@ function makeNode(name: string): any {
       const clone = makeNode(this.name);
       clone.manualKeyframeTracks = cloneData(this.manualKeyframeTracks);
       clone.effects = cloneData(this.effects);
+      clone.type=this.type;
       clone.opacity=this.opacity;clone.visible=this.visible;clone.relativeTransform=this.relativeTransform;
-      const marker = this.getPluginData("orbit-motion");
-      if (marker) clone.setPluginData("orbit-motion", marker);
+      for(const [key,value] of pluginData)clone.setPluginData(key,value);
+      if(this.children){
+        clone.children=this.children.map(child=>child.clone());
+        for(const child of clone.children){parent.children=parent.children.filter(item=>item.id!==child.id);child.parent=clone;}
+      }
       parent.insertChild(parent.children.indexOf(this) + 1, clone);
       return clone;
     },
@@ -973,6 +978,25 @@ for(const preset of [...referencePresets,{...referencePresets.find(p=>p.id==="re
   const cards=Array.from({length:3},(_,i)=>makeNode(`${preset.label} card ${i}`));
   for(const [index,card] of cards.entries()){card.relativeTransform=[[1,0,301+index*139],[0,1,423]];parent.insertChild(parent.children.length,card);}
   globalThis.figma.currentPage.selection=cards;
+  for(const card of cards){
+    const clone=card.clone;
+    card.clone=function(){
+      assert.equal(this.visible,false,"Reference copies must be hidden at their initial sibling insertion, before reparenting");
+      const copy=clone.call(this);
+      assert.equal(copy.visible,false,"A transient clone must not enter the live Motion render cache");
+      let opacity=copy.opacity;
+      Object.defineProperty(copy,"opacity",{
+        get:()=>opacity,
+        set:(value:number)=>{
+          assert(!copy.manualKeyframeTracks.OPACITY,
+            "Writing artwork opacity after its track creates an unintended key at the current native playhead");
+          opacity=value;
+        },
+        configurable:true,
+      });
+      return copy;
+    };
+  }
   const settings=freshPreset(preset.id),messageStart=postedMessages.length;
   if("queueShape" in preset)settings.geometry.shape=preset.queueShape as MotionSettings["geometry"]["shape"];
   if(preset.id==="reference-carousel-01")settings.motion.duration=200;
@@ -990,7 +1014,7 @@ for(const preset of [...referencePresets,{...referencePresets.find(p=>p.id==="re
   const marker=JSON.parse(cards[0].getPluginData("orbit-motion")),root=nodes.get(marker.serviceIds[0]);
   assert.equal(marker.settings.version,2,"Figma stores the canonical document");
   assert(!("reference" in marker.settings),"No parallel reference settings are persisted");
-  assert(root&&root.clipsContent,"Reference output clips to the frame");
+  assert(root&&root.clipsContent&&root.visible,"Completed reference output is revealed and clips to the frame");
   if(preset.id==="reference-board")assert(root.children.length<100,"Board reuses offscreen tiles instead of exporting the full world grid");
   assert(cards.every(card=>card.opacity===1&&card.visible),"Design canvas retains the editable source cards");
   assert(cards.every((card,index)=>card.x===301+index*139&&card.y===423),"Apply preserves the source layout outside playback");
@@ -998,6 +1022,13 @@ for(const preset of [...referencePresets,{...referencePresets.find(p=>p.id==="re
   assert.equal(sampleTrack(root.manualKeyframeTracks.OPACITY,0),1,"Service composition is visible from the first playback frame");
   assert.equal(sampleTrack(root.manualKeyframeTracks.OPACITY,settings.motion.duration),1,"Service composition remains visible through the end of playback");
   for(const slot of root.children){
+    const artwork=slot.children.at(-1);
+    assert.equal(slot.opacity,0,"Inactive service wrappers must be transparent before Motion evaluation");
+    assert.equal(artwork.opacity,0,"Service artwork must be transparent before Motion evaluation");
+    for(const t of [0,settings.motion.duration*.14755,settings.motion.duration*.87]){
+      if(sampleTrack(slot.manualKeyframeTracks.OPACITY,t)===0)
+        assert.equal(sampleTrack(artwork.manualKeyframeTracks.OPACITY,t),0,"Inactive artwork must hide itself even if the player retains its parent state");
+    }
     const keys=slot.manualKeyframeTracks.OPACITY.keyframes;
     for(let i=1;i<keys.length;i++){
       assert(Math.round(keys[i].timelinePosition*1e6)>Math.round(keys[i-1].timelinePosition*1e6),`${preset.label}: visibility keys must stay distinct at native microsecond precision`);
@@ -1032,7 +1063,7 @@ for(const preset of [...referencePresets,{...referencePresets.find(p=>p.id==="re
       assert.equal(image.x,(slot.width-image.width)/2,"Cloned card is centered inside its clipping slot on X");
       assert.equal(image.y,(slot.height-image.height)/2,"Cloned card is centered inside its clipping slot on Y");
       const alpha=image.manualKeyframeTracks.OPACITY?sampleTrack(image.manualKeyframeTracks.OPACITY,time):image.opacity;
-      assert(Math.abs(alpha-(1-(card.shade??0))*(card.opacity??1))<.001,`${preset.label}: image fade`);
+      assert(Math.abs(alpha-(1-(card.shade??0))*(card.opacity??1))<.001,`${preset.label}: image fade at ${time}, actual ${alpha}, expected ${(1-(card.shade??0))*(card.opacity??1)}`);
     }
   }
   const before=[...root.children];
@@ -1051,7 +1082,7 @@ for(const preset of [...referencePresets,{...referencePresets.find(p=>p.id==="re
   const refreshed=nodes.get(JSON.parse(cards[0].getPluginData("orbit-motion")).serviceIds[0]);
   assert.equal(refreshed.opacity,0,"Refresh preserves the canvas/playback separation");
   assert(cards.every(card=>card.visible&&card.opacity===1&&sampleTrack(card.manualKeyframeTracks.OPACITY,0)===0),"Refreshed originals remain editable on canvas and hidden during playback");
-  assert(refreshed.children.every((slot:any)=>{const card=slot.children.at(-1);return card.visible&&card.opacity===1&&card.manualKeyframeTracks.OPACITY?.baseValue.value===1;}),"Refresh restores visible copies and their opacity bases from hidden originals");
+  assert(refreshed.children.every((slot:any)=>{const card=slot.children.at(-1);return card.visible&&card.opacity===0&&card.manualKeyframeTracks.OPACITY?.baseValue.value===0;}),"Refresh keeps service artwork transparent at rest and gates it during playback");
   globalThis.figma.currentPage.selection=[cards[1]];
   const currentRoot=nodes.get(JSON.parse(cards[0].getPluginData("orbit-motion")).serviceIds[0]);
   const removeCurrentRoot=currentRoot.remove.bind(currentRoot);
@@ -1149,3 +1180,113 @@ assert(postedMessages.slice(invalidMessageStart).some(message=>message.kind==="e
 const nextMessageStart=postedMessages.length;
 await onMessage({type:"apply",settings:toMotionDocument(freshPreset("circle"))});
 assert(postedMessages.slice(nextMessageStart).some(message=>message.type==="result"),"Apply operation lock is released after invalid input");
+
+// Nested animations through both real exporter paths, including service clones.
+{
+  const internalTrack={baseValue:{type:"FLOAT",value:6.2831854820251465},keyframes:[
+    {timelinePosition:.129717,value:{type:"FLOAT",value:3.1415927410125732},easing:{type:"CUSTOM_CUBIC_BEZIER",easingFunctionCubicBezier:{x1:.5,y1:0,x2:.5,y2:1}}},
+    {timelinePosition:1.329717,value:{type:"FLOAT",value:5.989233016967773},easing:{type:"CUSTOM_CUBIC_BEZIER",easingFunctionCubicBezier:{x1:.5,y1:0,x2:.5,y2:1}}},
+  ]};
+  const makeCard=(name:string)=>{
+    const card=makeNode(name),child=makeNode(name+" animated content");
+    card.type="GROUP";card.children=[child];child.parent=card;
+    child.manualKeyframeTracks.OPACITY={baseValue:{type:"FLOAT",value:1},keyframes:[
+      {timelinePosition:.2,value:{type:"FLOAT",value:0},easing:{type:"LINEAR"}},
+      {timelinePosition:.8,value:{type:"FLOAT",value:1},easing:{type:"LINEAR"}},
+    ]};
+    child.manualKeyframeTracks[""]=cloneData(internalTrack);
+    return card;
+  };
+  const cards=Array.from({length:6},(_,i)=>makeCard(`Nested ${i}`));
+  parent.children=cards;for(const card of cards)card.parent=parent;
+  globalThis.figma.currentPage.selection=cards;
+  const originals=cards.map(card=>cloneData(card.children[0].manualKeyframeTracks.OPACITY));
+  const run=async(settings:MotionSettings)=>{
+    const start=postedMessages.length;await onMessage({type:"apply",settings:toMotionDocument(settings)});
+    const errors=postedMessages.slice(start).filter(message=>message.kind==="error");
+    assert.equal(errors.length,0,errors.map(message=>message.message).join("\n"));
+    const result=postedMessages.slice(start).find(message=>message.type==="result");
+    assert.equal(Boolean(result.warning),settings.other.startOnEntry,"Unsupported timing must be surfaced to the UI");
+    const check=node=>{
+      if(node.name.endsWith(" animated content"))assert.deepEqual(node.manualKeyframeTracks[""],internalTrack,"Unsupported track survives native cloning and Refresh");
+      for(const child of node.children??[])check(child);
+    };
+    cards.forEach(check);
+    for(const id of new Set(cards.flatMap(card=>{
+      const marker=card.getPluginData("orbit-motion");
+      return marker?JSON.parse(marker).serviceIds:[];
+    })))check(nodes.get(id));
+  };
+  const orbit=freshPreset("circle");orbit.other.startOnEntry=true;orbit.other.entryOffset=.4;orbit.other.serviceLayers="2";
+  for(let pass=0;pass<2;pass++){
+    await run(orbit);
+    for(const card of cards){
+      const child=card.children[0];
+      const index=cards.indexOf(card);
+      const fitted=fitSettingsToFrame(orbit,720,400,card.width,card.height,cards.length);
+      const poses=generateNodeKeyframes({...fitted,motion:{...fitted.motion,keyframes:32}},index,cards.length);
+      const maxZ=Math.max(...poses.filter(p=>p.opacity>.001).map(p=>p.z));
+      const front=poses.find(p=>p.opacity>.001&&Math.abs(p.z-maxZ)<1e-8);
+      const expectedStart=front.time+.6;
+      const keys=child.manualKeyframeTracks.OPACITY.keyframes;
+      if(expectedStart<orbit.motion.duration)assert(Math.abs(keys[0].timelinePosition-expectedStart)<1e-8,`Nested motion waits for the foreground pose: ${index}, actual ${keys[0].timelinePosition}, expected ${expectedStart}`);
+      else assert(keys.every(key=>key.value.value===originals[index].keyframes[0].value.value),"An offset beyond the seam keeps the returning card at its initial state");
+      const marker=JSON.parse(card.getPluginData("orbit-motion"));
+      for(const id of marker.serviceIds){const service=nodes.get(id);assert.deepEqual(service.children[0].manualKeyframeTracks.OPACITY,child.manualKeyframeTracks.OPACITY,"Depth copies stay synchronized on Apply/Refresh");}
+    }
+  }
+  orbit.other.startOnEntry=false;await run(orbit);
+  cards.forEach((card,index)=>assert.deepEqual(card.children[0].manualKeyframeTracks.OPACITY,originals[index]));
+  orbit.other.startOnEntry=true;await run(orbit);
+  const row=freshPreset("reference-carousel-05",orbit);row.other.entryOffset=.4;
+  await run(row);
+  for(const [index,card] of cards.entries()){
+    assert.deepEqual(card.children[0].manualKeyframeTracks.OPACITY,originals[index],"Native sources return to authored timing");
+    const root=nodes.get(JSON.parse(card.getPluginData("orbit-motion")).serviceIds[0]);
+    const instances=root.children.filter(slot=>slot.name.startsWith(card.name)).map(slot=>slot.children.at(-1));
+    assert(instances.length>0);
+    for(const instance of instances)assert(instance.children[0].manualKeyframeTracks.OPACITY.keyframes.every(key=>key.timelinePosition>=0),"Native cyclic tracks stay within the public timeline");
+  }
+  await run(row);
+  const stack=freshPreset("reference-stack-01",row);stack.other.serviceLayers="4";
+  await run(stack);await run(stack);
+  // Inspect actual scene ownership transitions, then verify nested playback.
+  let previousMain=-1;const starts=new Map<number,number>();
+  for(let t=0;t<stack.motion.duration;t+=.01){
+    const main=[...referenceScene(stack,cards,720,400,t)].sort((a,b)=>b.layer-a.layer)[0];
+    if(main&&main.source!==previousMain){if(t>0)starts.set(main.source,t);previousMain=main.source;}
+  }
+  for(const [source,start] of starts){
+    const card=cards[source],root=nodes.get(JSON.parse(card.getPluginData("orbit-motion")).serviceIds[0]);
+    const slot=root.children.find(slot=>slot.name.startsWith(card.name));
+    const track=slot.children.at(-1).children[0].manualKeyframeTracks.OPACITY;
+    const probe=(start+.4+.2+.3)%stack.motion.duration;
+    assert(Math.abs(sampleTrack(track,probe)-.5)<.03,"Every foreground occurrence, including the last duplicate, replays without waiting for the seam");
+  }
+  // Every source visible at both ends must have matching inner playback states.
+  const seamRoot=nodes.get(JSON.parse(cards[0].getPluginData("orbit-motion")).serviceIds[0]);
+  const seamState=time=>seamRoot.children.filter(slot=>sampleTrack(slot.manualKeyframeTracks.OPACITY,time)>.5)
+    .map(slot=>({name:slot.name.split(" · layer")[0],value:sampleTrack(slot.children.at(-1).children[0].manualKeyframeTracks.OPACITY,time)}))
+    .sort((a,b)=>a.name.localeCompare(b.name));
+  const seamEnd=seamState(stack.motion.duration),seamStart=seamState(0);
+  assert.deepEqual(seamEnd.map(item=>item.name),seamStart.map(item=>item.name));
+  seamEnd.forEach((item,index)=>assert(Math.abs(item.value-seamStart[index].value)<1e-6,`Stack duplicate matches initial nested state at the loop seam: ${JSON.stringify({seamEnd,seamStart})}`));
+  row.other.startOnEntry=false;await run(row);
+  for(const [index,card] of cards.entries()){
+    const root=nodes.get(JSON.parse(card.getPluginData("orbit-motion")).serviceIds[0]);
+    for(const slot of root.children.filter(slot=>slot.name.startsWith(card.name)))assert.deepEqual(slot.children.at(-1).children[0].manualKeyframeTracks.OPACITY,originals[index]);
+  }
+  await run(orbit);
+  cards[1].locked=true;
+  await run(orbit);
+  assert.deepEqual(cards[1].children[0].manualKeyframeTracks.OPACITY,originals[1],"Locked Refresh restores authored nested timing before removing outer motion");
+  assert.equal(cards[1].children[0].getPluginData("orbit-entry-motion"),"");
+  assert.equal(cards[1].getPluginData("orbit-motion"),"");
+  cards[1].locked=false;
+  await run(orbit);
+  await onMessage({type:"clear",scope:"selection"});
+  cards.forEach((card,index)=>assert.deepEqual(card.children[0].manualKeyframeTracks.OPACITY,originals[index],"Clear preserves internal animation"));
+  assert(cards.every(card=>!card.children[0].getPluginData("orbit-entry-motion")));
+  cards.forEach(card=>assert.deepEqual(card.children[0].manualKeyframeTracks[""],internalTrack,"Clear preserves unsupported track"));
+  console.log("Nested exporter integration: Orbit, depth copies, native Row, Refresh, toggle off and Clear passed");
+}

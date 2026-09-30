@@ -248,14 +248,14 @@ export function toMotionDocument(settings:MotionSettings):MotionDocument{
   if(model!=="trajectory"&&model!=="rfCarousel"&&settings.reference&&easePaths.every(key=>typeof settings.reference![key]==="number")){
     parameters.easing={type:"easing",duration:1,ease:easePaths.map(key=>settings.reference![key]) as [number,number,number,number]};
   }
-  return {version:2,preset:settings.preset,model,parameters,other:{...settings.other}};
+  return {version:2,preset:settings.preset,model,parameters,other:{startOnEntry:false,entryOffset:0,...settings.other}};
 }
 /** Compatibility adapter: no legacy settings are stored alongside the document. */
 export function fromMotionDocument(document:MotionDocument):MotionSettings{
   const settings=compatibilityBase();
   settings.preset=document.preset;
   settings.renderer=document.model==="trajectory"?"legacy":document.model;
-  settings.other={...document.other};
+  settings.other={...settings.other,...document.other};
   if(document.model!=="trajectory")settings.reference=referenceDefaults(definitions.get(document.model)!.id);
   for(const binding of modelBindings(document.model)){
     let value=document.parameters[binding.id]??defaultOf(binding.config);
@@ -373,7 +373,7 @@ for(const bindings of registry.values())for(const binding of bindings){
 export const motionControls={
   version:[2,2,2],preset:compatibilityControls.preset,
   model:{type:"select",options:models,default:"trajectory"},
-  parameters:parameterControls,other:compatibilityControls.other,
+  parameters:parameterControls,other:{...compatibilityControls.other,entryOffset:[0,-Number.MAX_VALUE,Number.MAX_VALUE,0]},
 } satisfies DialConfig;
 
 export function validateMotionDocument(input:unknown):MotionDocument{
@@ -427,6 +427,9 @@ export function validateMotionDocument(input:unknown):MotionDocument{
     }else if(typeof value!==typeof config)throw new Error("Invalid "+binding.label);
   }
   if(!["selection","children","deep"].includes(document.other.scope))throw new Error("Unsupported selection scope.");
+  document.other.startOnEntry??=false;
+  document.other.entryOffset??=0;
+  if(typeof document.other.startOnEntry!=="boolean"||typeof document.other.entryOffset!=="number"||!Number.isFinite(document.other.entryOffset))throw new Error("Invalid animation entry timing.");
   if(!["0","2","3","4","5"].includes(document.other.serviceLayers)||typeof document.other.centerBeforeApply!=="boolean")throw new Error("Invalid output settings.");
   return cloneData(document);
 }
