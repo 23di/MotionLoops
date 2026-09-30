@@ -112,6 +112,36 @@ await restoreNestedMotion(staleRoot);
 assert.equal(staleChild.manualKeyframeTracks.OPACITY.keyframes[0].timelinePosition,.3);
 figma.getNodeByIdAsync=getNode;
 
+// Native writes may replace the card ID as well as all descendant IDs, without
+// retaining old aliases. Refresh and rollback must resolve from the page tree.
+const remapA=node(),remapB=node(),remapCard=node([remapA,remapB]);
+remapA.manualKeyframeTracks.OPACITY=track();remapA.manualKeyframeTracks.TRANSLATION_X=track();
+remapB.manualKeyframeTracks.OPACITY=track();
+const remapPage={id:'remap-page',type:'PAGE',children:[remapCard],manualKeyframeTracks:{},animationStyles:[]};nodes.set(remapPage.id,remapPage);
+remapCard.parent=remapPage;remapA.parent=remapB.parent=remapCard;
+const [remapSnapshot]=await prepareNestedMotion([remapCard],true);
+const restoreRemapped=await captureNestedState([remapCard]);
+const remapWrite=remapA.applyManualKeyframeTrack;let remapGeneration=0;
+remapA.applyManualKeyframeTrack=function(...args){
+  remapWrite.apply(this,args);
+  for(const n of [remapCard,remapA,remapB]){nodes.delete(n.id);n.id+='-new-'+(++remapGeneration);nodes.set(n.id,n);}
+};
+await applyNestedMotion(remapCard.id,remapSnapshot,2,true);
+assert.equal(remapA.manualKeyframeTracks.TRANSLATION_X.keyframes[0].timelinePosition,2.3);
+assert.equal(remapB.manualKeyframeTracks.OPACITY.keyframes[0].timelinePosition,2.3);
+await restoreNestedMotion(remapCard);
+assert.equal(remapB.manualKeyframeTracks.OPACITY.keyframes[0].timelinePosition,.3);
+await applyNestedMotion(remapCard.id,remapSnapshot,2,true);
+await restoreRemapped();
+assert.equal(remapA.manualKeyframeTracks.OPACITY.keyframes[0].timelinePosition,.3);
+const failRemapWrite=remapB.applyManualKeyframeTrack;let rejectRemap=true;
+remapB.applyManualKeyframeTrack=function(...args){if(rejectRemap){rejectRemap=false;throw new Error('remapped write failed');}return failRemapWrite.apply(this,args);};
+await assert.rejects(applyNestedMotion(remapCard.id,remapSnapshot,2,true),error=>
+  /remapped write failed/.test(error.message)&&!/rollback failed/.test(error.message));
+assert.equal(remapA.manualKeyframeTracks.OPACITY.keyframes[0].timelinePosition,.3);
+assert.equal(remapA.getPluginData('orbit-entry-motion'),'');
+console.log('Nested replaced IDs: Apply, toggle off/on, source recovery and rollback passed');
+
 // A rollback failure must retain the original write error and continue other layers.
 const rollbackA=node(),rollbackB=node(),rollbackRoot=node([rollbackA,rollbackB]);
 rollbackA.manualKeyframeTracks.OPACITY=track();rollbackB.manualKeyframeTracks.OPACITY=track();

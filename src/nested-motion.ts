@@ -99,8 +99,38 @@ export async function prepareNestedMotion(roots:readonly SceneNode[],enabled:boo
   }));
 }
 
-async function layerAt(rootId:string,path:number[]):Promise<SceneNode> {
-  let node=await figma.getNodeByIdAsync(rootId);
+type RootResolver=()=>Promise<BaseNode|null>;
+// Motion can replace an entire card subtree, dropping aliases for the old IDs.
+// Child order stays fixed during nested writes, so retain a page-relative anchor.
+function rootResolver(root:SceneNode):RootResolver {
+  let id=root.id;
+  const path:number[]=[];
+  let ancestor:BaseNode=root;
+  while(ancestor.parent&&ancestor.parent.type!=="DOCUMENT"){
+    const parent:BaseNode=ancestor.parent;
+    if(!("children" in parent))break;
+    const index=parent.children.findIndex(child=>child.id===ancestor.id);
+    if(index<0)break;
+    path.unshift(index);ancestor=parent;
+  }
+  const pageId=ancestor.type==="PAGE"?ancestor.id:undefined;
+  return async()=>{
+    const direct=await figma.getNodeByIdAsync(id);
+    if(direct&&!direct.removed)return direct;
+    if(!pageId)return null;
+    let node=await figma.getNodeByIdAsync(pageId);
+    for(const index of path){
+      if(!node||!("children" in node))return null;
+      const child:BaseNode|undefined=node.children[index];
+      node=child?await figma.getNodeByIdAsync(child.id):null;
+    }
+    if(node)id=node.id;
+    return node;
+  };
+}
+
+async function layerAt(rootId:string,path:number[],resolveRoot?:RootResolver):Promise<SceneNode> {
+  let node=resolveRoot?await resolveRoot():await figma.getNodeByIdAsync(rootId);
   for(const index of path){
     if(!node||!("children" in node))throw new Error("A nested animation layer became unavailable.");
     const child:BaseNode|undefined=node.children[index];
@@ -119,12 +149,12 @@ type LayerState = {path:number[]; tracks:ReturnType<typeof collectManualTracks>;
 const errorText=(error:unknown)=>error instanceof Error?error.message:String(error);
 
 /** Re-resolve after every mutation: native Motion writes can invalidate node handles. */
-async function writeLayer(rootId:string,layer:LayerState):Promise<void> {
-  let id=(await layerAt(rootId,layer.path)).id;
+async function writeLayer(rootId:string,layer:LayerState,resolveRoot?:RootResolver):Promise<void> {
+  let id=(await layerAt(rootId,layer.path,resolveRoot)).id;
   const fresh=async()=>{
     const node=await figma.getNodeByIdAsync(id);
     if(node&&node.type!=="DOCUMENT"&&node.type!=="PAGE"&&!node.removed)return node;
-    const replacement=await layerAt(rootId,layer.path);id=replacement.id;return replacement;
+    const replacement=await layerAt(rootId,layer.path,resolveRoot);id=replacement.id;return replacement;
   };
   for(const {field,input} of layer.tracks){
     const node=await fresh();
@@ -136,10 +166,10 @@ async function writeLayer(rootId:string,layer:LayerState):Promise<void> {
   const node=await fresh();
   if(node.getPluginData(markerKey)!==layer.marker)node.setPluginData(markerKey,layer.marker);
 }
-async function restoreLayers(rootId:string,layers:LayerState[]):Promise<string[]> {
+async function restoreLayers(rootId:string,layers:LayerState[],resolveRoot?:RootResolver):Promise<string[]> {
   const errors:string[]=[];
   for(const layer of layers){
-    try{await writeLayer(rootId,layer);}
+    try{await writeLayer(rootId,layer,resolveRoot);}
     catch(error){errors.push(errorText(error));}
   }
   return errors;
@@ -149,9 +179,13 @@ export interface NestedMotionJob {rootId:string; snapshot:NestedMotion; shift:nu
 export async function applyNestedMotionBatch(jobs:readonly NestedMotionJob[]):Promise<void> {
   const previous:Array<{rootId:string;layer:LayerState}>=[];
   const expected:Array<{rootId:string;id:string;layer:LayerState}>=[];
+  const roots=new Map<string,RootResolver>();
   try{
     const requests=jobs.flatMap(({rootId,snapshot,shift,enabled,rewindAt,loopEnd,occurrences,offset})=>snapshot.layers.map(layer=>({rootId,shift,enabled,rewindAt,loopEnd,occurrences,offset,layer})));
-    const resolved=await Promise.all(requests.map(({rootId,layer})=>layerAt(rootId,layer.path)));
+    for(const rootId of new Set(requests.map(request=>request.rootId))){
+      const root=await layerAt(rootId,[]);roots.set(rootId,rootResolver(root));
+    }
+    const resolved=await Promise.all(requests.map(({rootId,layer})=>layerAt(rootId,layer.path,roots.get(rootId))));
     for(const [index,{rootId,shift,enabled,rewindAt,loopEnd,occurrences,offset,layer}] of requests.entries()){
       const node=resolved[index];
       const before={path:layer.path,tracks:collectManualTracks(node.manualKeyframeTracks),marker:node.getPluginData(markerKey)};
@@ -171,7 +205,7 @@ export async function applyNestedMotionBatch(jobs:readonly NestedMotionJob[]):Pr
     const fresh=async(item:typeof expected[number])=>{
       const node=await figma.getNodeByIdAsync(item.id);
       if(node&&node.type!=="DOCUMENT"&&node.type!=="PAGE"&&!node.removed)return node;
-      const replacement=await layerAt(item.rootId,item.layer.path);item.id=replacement.id;return replacement;
+      const replacement=await layerAt(item.rootId,item.layer.path,roots.get(item.rootId));item.id=replacement.id;return replacement;
     };
     // Resolve fresh handles together, then synchronously write one field per node.
     // This retains native-handle safety without awaiting every individual layer.
@@ -193,7 +227,7 @@ export async function applyNestedMotionBatch(jobs:readonly NestedMotionJob[]):Pr
     }
     await new Promise<void>(resolve=>setTimeout(resolve,0));
     for(const {rootId,layer} of expected){
-      const node=await layerAt(rootId,layer.path);
+      const node=await layerAt(rootId,layer.path,roots.get(rootId));
       for(const {field,input} of layer.tracks){
         const actual=manualAt(node,field);
         if(!actual||!sameMotion(trackContents(actual),input))throw new Error(`${node.name} (${node.id}), ${fieldKey(field)}: Figma did not preserve nested animation timing.`);
@@ -201,7 +235,7 @@ export async function applyNestedMotionBatch(jobs:readonly NestedMotionJob[]):Pr
     }
   }catch(error){
     const failures:string[]=[];
-    for(const {rootId,layer} of previous.reverse())failures.push(...await restoreLayers(rootId,[layer]));
+    for(const {rootId,layer} of previous.reverse())failures.push(...await restoreLayers(rootId,[layer],roots.get(rootId)));
     if(failures.length)throw new Error(`${errorText(error)}; nested rollback failed: ${failures.join("; ")}`);
     throw error;
   }
@@ -217,12 +251,12 @@ export async function restoreNestedMotion(root:SceneNode):Promise<void> {
 
 /** Restore original child state if a native composition fails during commit. */
 export async function captureNestedState(roots:readonly SceneNode[]):Promise<()=>Promise<void>> {
-  const states=roots.map(root=>({id:root.id,layers:descendants(root).filter(({node})=>node.manualKeyframeTracks).map(({node,path})=>({
+  const states=roots.map(root=>({id:root.id,resolveRoot:rootResolver(root),layers:descendants(root).filter(({node})=>node.manualKeyframeTracks).map(({node,path})=>({
     path,tracks:collectManualTracks(node.manualKeyframeTracks),marker:node.getPluginData(markerKey),
   }))}));
   return async()=>{
     const errors:string[]=[];
-    for(const root of states)errors.push(...await restoreLayers(root.id,root.layers.filter(layer=>layer.tracks.length||layer.marker)));
+    for(const root of states)errors.push(...await restoreLayers(root.id,root.layers.filter(layer=>layer.tracks.length||layer.marker),root.resolveRoot));
     if(errors.length)throw new Error(errors.join("; "));
   };
 }
