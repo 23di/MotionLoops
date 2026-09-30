@@ -26,10 +26,11 @@ export const rowGalleryGroups = [
   ["reference-carousel-17", "reference-carousel-18"],
 ];
 
+// Only the first Stack recipe is offered; other snapshots remain loadable.
 // Row 07 and Row 08 are retained only for old saved documents. Row 06 is the
 // single large-edge recipe offered in the gallery.
 export const retiredGalleryPresets = new Set([
-  "reference-stack-02", "reference-stack-03",
+  "reference-stack-02", "reference-stack-03", "reference-stack-04",
   "reference-carousel-01", "reference-carousel-02",
   "reference-carousel-03", "reference-carousel-04",
   "reference-carousel-09", "reference-carousel-10",

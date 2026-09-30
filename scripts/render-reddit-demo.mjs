@@ -7,7 +7,7 @@ import {join,resolve} from 'node:path';
 import {spawnSync} from 'node:child_process';
 const bundle=await build({stdin:{contents:`export {freshPreset} from './src/catalog';export {referenceDefinition,activeReferencePresets} from './src/reference-catalog';export {referenceScene} from './src/reference-engine';export {fitSettingsToFrame,generateNodeKeyframes,sampleGeneratedKeyframes} from './src/engine';`,resolveDir:process.cwd()},bundle:true,write:false,platform:'node',format:'esm'});
 const engine=await import('data:text/javascript;base64,'+Buffer.from(bundle.outputFiles[0].text).toString('base64'));
-const chapters=[{id:'orbit-3d-compact',label:'Orbit 04'},{id:'reference-carousel-07',label:'Row 02'},{id:'reference-stack-01',label:'Stack 01'},{id:'reference-spiralimages',label:'Vortex'}];
+const chapters=[{id:'orbit-3d-compact',label:'Orbit 04'},{id:'reference-carousel-07',label:'Row 02'},{id:'reference-stack-01',label:'Stack'},{id:'reference-spiralimages',label:'Vortex'}];
 // Resolve the public Vortex entry rather than relying on a guessed legacy ID.
 chapters[3].id=engine.activeReferencePresets.find(p=>p.label==='Vortex 01')?.id??engine.activeReferencePresets.find(p=>p.label.startsWith('Vortex'))?.id;
 if(!chapters[3].id)throw new Error('Vortex preset unavailable');

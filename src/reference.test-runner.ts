@@ -10,9 +10,9 @@ const serializeSettingsJson=(settings:unknown)=>JSON.stringify(settings,null,2);
 import { preferredSettings } from "./preferred-numbers";
 import { cloneData } from "./clone-data";
 
-assert.equal(activeReferencePresets.length,7);
+assert.equal(activeReferencePresets.length,6);
 assert.deepEqual(activeReferencePresets.filter(p=>p.mode==="rfCarousel").map(p=>p.label),["Row 01","Row 02","Row 03"]);
-assert.deepEqual(activeReferencePresets.filter(p=>p.mode==="rfStack").map(p=>p.label),["Stack 01","Stack 02"]);
+assert.deepEqual(activeReferencePresets.filter(p=>p.mode==="rfStack").map(p=>({id:p.id,label:p.label})),[{id:"reference-stack-01",label:"Stack"}]);
 assert(!activeReferencePresets.some(p=>p.label==="Cilinder"),"Previous Cilinder is retired");
 assert.equal(activeReferencePresets.filter(p=>p.mode==="rfCarousel").length,3);
 for(const preset of activeReferencePresets.filter(p=>p.mode==="rfCarousel")){
@@ -79,7 +79,7 @@ for(const direction of ["left","right","up","down"]){
 for(const preset of activeReferencePresets.filter(p=>p.mode==="rfStack"))
   assert(["up","down"].includes(String(freshPreset(preset.id).reference?.direction)),"Stack keeps its vertical source direction");
 assert(!activeReferencePresets.some(p=>/flicker|scale|swipe|board/.test(p.id)));
-assert.equal(new Set(activeReferencePresets.map(p=>p.label)).size,7);
+assert.equal(new Set(activeReferencePresets.map(p=>p.label)).size,6);
 const vortexPreset=activeReferencePresets.find(p=>p.label==="Vortex")!;
 const vortexSettings=freshPreset(vortexPreset.id);
 const vortexSources=[{width:120,height:160},{width:120,height:160}];

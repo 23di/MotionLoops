@@ -12,7 +12,8 @@ const serializeSettingsJson=(settings:unknown)=>JSON.stringify(settings,null,2);
 import { preferredNumber, preferredSettings } from "./preferred-numbers";
 
 assert.equal(familyFor("reference-carousel-05").name,"Row 01","Saved native presets use current gallery names");
-assert.equal(familyFor("reference-stack-04").name,"Stack 02","Saved stack uses current gallery name");
+assert.equal(familyFor("reference-stack-01").name,"Stack","The remaining stack uses the unnumbered gallery name");
+assert.equal(familyFor("reference-stack-04").name,"Stack 04","Retired stack remains loadable under its saved name");
 
 for (const id of ["orbit-3d-tilted", "orbit-3d-helix", "orbit-3d-eight", "path-wave", "orbit-3d-sphere", "vortex", "racetrack"] as const) {
   assert.equal(freshPreset(id).appearance.cardSize, 30, `${id}: shared default card size`);

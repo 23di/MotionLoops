@@ -885,6 +885,7 @@ export const activeReferencePresets=referencePresets
   .filter(preset=>recipePresentation[recipeKey(preset)].available&&!galleryAlternates.has(preset.id)&&!retiredGalleryPresets.has(preset.id))
   .map(preset=>{
     if(preset.mode==="motif")return preset;
+    if(preset.mode==="rfStack")return {...preset,label:"Stack"};
     const name=recipePresentation[recipeKey(preset)].name;
     const number=(galleryCounters.get(name)??0)+1;
     galleryCounters.set(name,number);
