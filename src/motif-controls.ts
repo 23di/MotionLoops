@@ -28,6 +28,6 @@ export function motifEditor(preset:MotifPreset):EditorSchema{
   // Quick controls are shortcuts. Keep the same parameters in their full section.
   const group=(name:string)=>params.filter(param=>param.group===name).map(param=>`reference.${param.key}`);
   if(preset.templateId==="LoopSwirlTemplate")labels["reference.spacing"]="Gap";
-  const sections=[{id:"motion",title:"Motion",paths:["motion.duration",...group("animation")]},{id:"geometry",title:"Geometry",paths:group("template")},{id:"appearance",title:"Appearance",paths:[...group("appearance"),"reference.cornerRadius","reference.cropAspect"]},{id:"other",title:"Other",paths:["other.scope","other.copyJson","other.pasteJson","other.resetSettings"]}].filter(section=>section.paths.length);
+  const sections=[{id:"motion",title:"Motion",paths:["motion.duration",...group("animation")]},{id:"geometry",title:"Geometry",paths:group("template")},{id:"appearance",title:"Appearance",paths:[...group("appearance"),"reference.cropAspect"]},{id:"other",title:"Other",paths:["other.scope","other.copyJson","other.pasteJson","other.resetSettings"]}].filter(section=>section.paths.length);
   return {geometry:[],quickDirection:false,quickControls:quick,sections,controls:sections.flatMap(section=>section.paths),overrides,labels};
 }

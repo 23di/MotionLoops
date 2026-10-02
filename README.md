@@ -47,3 +47,9 @@ Figma may expose internal animation tracks with an empty property name. These tr
 Nested playback starts when a Stack card becomes the foreground card, a native carousel card becomes central, or a trajectory reaches its foreground pose. Offset shifts this moment earlier or later.
 
 With **Start when card is main**, supported nested tracks restart on every foreground occurrence. Returning native cards carry playback continuously through the loop seam. Refresh and Clear retain their authored timing. Linear and cubic segments that cross the seam are clipped while preserving their curve. A spring crossing the reset requires a longer cycle or shorter inner animation.
+
+Wrapping Path Trim animations (including FLOW at 150–200%) now participate in nested looping. Motion Loops splits whole-path crossings into editable 0–100% keyframes, preserving the visible motion instead of clamping it. Figma’s native setters reject trim values above 100%, even though its editor can author and play them. Refresh reuses the saved baseline; Clear restores the authored timing with this equivalent bounded notation on edited layers. Untouched native source cards retain their original notation. Wrapping springs and non-monotonic easing remain unchanged and produce a warning.
+
+Independent **Loop card animation** playback fits the nearest whole number of card cycles into the outer scene duration. For example, a 1.2s card animation in a 5s scene plays four 1.25s cycles instead of restarting halfway through the next lap at the global seam. All child tracks and delays scale together. **Start when card is main** retains the authored timing relative to each foreground occurrence. Clear restores the authored timing.
+
+Apply and Refresh request the scene duration after writing the animation. If Figma retains an existing timeline duration, the update succeeds with that duration unchanged; the generated keyframes still use the cycle duration selected in Motion Loops.

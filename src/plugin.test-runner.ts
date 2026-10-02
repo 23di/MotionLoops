@@ -9,6 +9,7 @@ import { cloneData } from "./clone-data";
 import { freshPreset } from "./catalog";
 import { pulseDefaults } from "./motion-modifiers";
 import { toMotionDocument } from "./motion-system";
+import { normalizeWrappingPathTrim } from "./nested-motion";
 
 let nextId = 1;
 const nodes = new Map<string, any>();
@@ -80,7 +81,10 @@ function remapAttachedTreeIds():void {
   }
 }
 
+let resetTimelineOnMotionWrite: number | null = null;
+let ignoreTimelineDurationWrites = false;
 let nativeCoordinateWrites=false;
+let nativeTimelinePrecision=false;
 function makeNode(name: string): any {
   const pluginData = new Map<string, string>();
   let relaunchData: Record<string, string> = {};
@@ -120,6 +124,7 @@ function makeNode(name: string): any {
     getTopLevelFrame: () => topFrame,
     getPluginData: (key: string) => pluginData.get(key) ?? "",
     setPluginData: (key: string, value: string) => {
+      if(nativeTimelinePrecision)assert(Buffer.byteLength(value,"utf8")<=100000,`Native plugin data exceeds 100kB: ${key} (${Buffer.byteLength(value,"utf8")})`);
       if(invalidatedSourceIds.has(node.id))throw new Error("Source proxy invalidated by service removal");
       pluginData.set(key,value);
       if(remapServiceOnNextMarker&&key==="orbit-motion"&&value){
@@ -133,7 +138,11 @@ function makeNode(name: string): any {
     setRelaunchData: (data: Record<string, string>) => { relaunchData = { ...data }; },
     getRelaunchData: () => ({ ...relaunchData }),
     applyManualKeyframeTrack(field: { name: string }, track: unknown) {
+      assert(track.keyframes.every(key=>Number.isFinite(key.timelinePosition)&&key.timelinePosition>=0),
+        "Native Figma rejects negative keyframe timestamps");
       assert.notEqual(field.name,"","Public Motion rejects unnamed properties");
+      if(["PATH_TRIM_START","PATH_TRIM_END"].includes(field.name)&&track.keyframes.some(key=>key.value.value<0||key.value.value>1))
+        throw new Error("path trim must be less than or equal to 1");
       if(remapTreeOnTrackWriteNodeId===this.id){
         remapTreeOnTrackWriteNodeId=null;
         remapAttachedTreeIds();
@@ -143,7 +152,18 @@ function makeNode(name: string): any {
         else failTrackWrite = null;
         throw new Error("Simulated stale Figma node");
       }
-      this.manualKeyframeTracks[field.name] = track;
+      if(nativeTimelinePrecision){
+        const keys=new Map();
+        let previous=-1;
+        for(const key of track.keyframes){
+          const micro=Math.round(key.timelinePosition*1e6);
+          assert(micro>previous,`Exporter must emit unique native timestamps before host merging: ${field.name}`);
+          previous=micro;
+          const time=micro/1e6;keys.set(time,{...cloneData(key),timelinePosition:time});
+        }
+        this.manualKeyframeTracks[field.name]={...cloneData(track),keyframes:[...keys.values()]};
+      }else this.manualKeyframeTracks[field.name] = track;
+      if (resetTimelineOnMotionWrite !== null) timeline.duration = resetTimelineOnMotionWrite;
     },
     removeManualKeyframeTrack(field: { name: string }) {
       if (failTrackRemoval?.nodeId === this.id && failTrackRemoval.field === field.name) {
@@ -156,13 +176,13 @@ function makeNode(name: string): any {
     },
     setTimelineDuration(id: string, duration: number) {
       assert.equal(id, timeline.id);
-      timeline.duration = duration;
+      if (!ignoreTimelineDurationWrites) timeline.duration = duration;
     },
     clone() {
       const clone = makeNode(this.name);
       clone.manualKeyframeTracks = cloneData(this.manualKeyframeTracks);
       clone.effects = cloneData(this.effects);
-      clone.type=this.type;
+      clone.type=this.type;clone.width=this.width;clone.height=this.height;
       clone.opacity=this.opacity;clone.visible=this.visible;clone.relativeTransform=this.relativeTransform;
       for(const [key,value] of pluginData)clone.setPluginData(key,value);
       if(this.children){
@@ -278,7 +298,7 @@ function easingProgress(easing: any, progress: number): number {
   let low = 0;
   let high = 1;
   let parameter = progress;
-  for (let iteration = 0; iteration < 18; iteration += 1) {
+  for (let iteration = 0; iteration < 40; iteration += 1) {
     parameter = (low + high) / 2;
     if (cubic(parameter, 0, curve.x1, curve.x2, 1) < progress) low = parameter;
     else high = parameter;
@@ -297,6 +317,7 @@ function sampleTrack(track: any, time: number): number {
   }
   const from = keys[destinationIndex - 1];
   const to = keys[destinationIndex];
+  if(time === to.timelinePosition)return to.value.value;
   const local = (time - from.timelinePosition) /
     (to.timelinePosition - from.timelinePosition);
   const progress = easingProgress(to.easing, local);
@@ -481,7 +502,9 @@ parent.insertChild(0, staleBack);
 settings.motion.duration = 3;
 settings.motion.fullCycle = { type: "easing", duration: 1, ease: [0.42, 0, 1, 1] };
 proxyChildReads = true;
+resetTimelineOnMotionWrite = 5;
 await onMessage({ type: "apply", settings });
+resetTimelineOnMotionWrite = null;
 proxyChildReads = false;
 assert.equal(parent.children.length, 2, "Refresh must remove stale duplicate back copies");
 const refreshedBack = currentBack();
@@ -938,6 +961,40 @@ globalThis.figma.createFrame=()=>{
   return frame;
 };
 globalThis.figma.createRectangle=()=>{const node=makeNode("Rectangle");node.resize=(w:number,h:number)=>{node.width=w;node.height=h;};return node;};
+// Late track writes must not leave the frame at its previous duration.
+{
+  const cards=[makeNode("Timeline card A"),makeNode("Timeline card B")];
+  parent.children=cards;
+  globalThis.figma.currentPage.selection=cards;
+  const settings=freshPreset("reference-carousel-05");
+  resetTimelineOnMotionWrite=5;
+  for(const duration of [18,3]){
+    settings.motion.duration=duration;
+    await onMessage({type:"apply",settings});
+    assert.equal(postedMessages.findLast(message=>message.type==="result").kind,"success");
+    assert.equal(timeline.duration,duration,"Native Apply and Refresh commit duration after all source and nested tracks");
+  }
+  resetTimelineOnMotionWrite=null;
+  const oldRootId=JSON.parse(cards[0].getPluginData("orbit-motion")).serviceIds[0];
+  ignoreTimelineDurationWrites=true;
+  let previousRootId=oldRootId;
+  for(const duration of [18,7]){
+    settings.motion.duration=duration;
+    await onMessage({type:"apply",settings});
+    const result=postedMessages.findLast(message=>message.type==="result");
+    assert.equal(result.kind,"success","A retained manual timeline duration must not fail Apply or Refresh");
+    const newRootId=JSON.parse(cards[0].getPluginData("orbit-motion")).serviceIds[0];
+    assert.notEqual(newRootId,previousRootId,"Retaining duration still commits the new animation");
+    assert(!nodes.has(previousRootId),"Successful update removes previous native output");
+    assert(nodes.has(newRootId));
+    const root=nodes.get(newRootId);
+    assert.equal(root.children[0].manualKeyframeTracks.TRANSLATION_X.keyframes.at(-1).timelinePosition,duration);
+    assert.equal(timeline.duration,3,"Manually retained timeline duration stays unchanged");
+    previousRootId=newRootId;
+  }
+  ignoreTimelineDurationWrites=false;
+  await onMessage({type:"clear",scope:"selection"});
+}
 // Failed clone cleanup must abort before hiding originals or removing old output.
 {
   const cards=[makeNode("Existing animated card A"),makeNode("Existing animated card B")];
@@ -964,14 +1021,25 @@ globalThis.figma.createRectangle=()=>{const node=makeNode("Rectangle");node.resi
     }
   }
   assert(legacyCopies.every((node:any)=>!nodes.has(node.id)),"Legacy copies are removed only after Row is built");
-  const clone=cards[0].clone;
-  cards[0].clone=function(){const copy=clone.call(this);failTrackRemoval={nodeId:copy.id,field:"OPACITY"};return copy;};
+  const clone=cards[1].clone;
+  cards[1].clone=function(){const copy=clone.call(this);failTrackRemoval={nodeId:copy.id,field:"OPACITY"};return copy;};
   const start=postedMessages.length;
-  await onMessage({type:"apply",settings});
+  const previousDuration=timeline.duration;
+  const previousSources=cards.map(regressionNodeState);
+  const previousOutput=regressionNodeState(oldRoot);
+  const previousOrder=parent.children.map(node=>node.id);
+  await onMessage({type:"apply",settings:{...settings,motion:{...settings.motion,duration:7}}});
   assert(postedMessages.slice(start).some(m=>m.kind==="error"),"Clone cleanup failure is reported");
   assert(nodes.has(oldRoot.id),"Previous output survives failed refresh");
   assert(cards.every(card=>JSON.parse(card.getPluginData("orbit-motion")).serviceIds[0]===oldRoot.id),"Original links survive failed refresh");
-  cards[0].clone=clone;
+  assert.equal(timeline.duration,previousDuration,"Failed native Refresh restores the original timeline after an earlier slot extended it");
+  assert.deepEqual(cards.map(regressionNodeState),previousSources,"Failed Refresh restores complete source geometry, appearance and tracks");
+  assert.deepEqual(regressionNodeState(oldRoot),previousOutput,"Failed Refresh preserves complete previous service output");
+  assert.deepEqual(parent.children.map(node=>node.id),previousOrder,"Failed Refresh leaves no replacement service or reordered sibling");
+  const failedResults=postedMessages.slice(start).filter(message=>message.type==="result");
+  assert.equal(failedResults.length,1,"Failed Refresh produces one terminal result");
+  assert.equal(failedResults[0].kind,"error","Failed Refresh cannot report partial success");
+  cards[1].clone=clone;
   await onMessage({type:"clear",scope:"selection"});
 }
 // Duplicated frames keep plugin data containing the original card IDs.
@@ -1214,6 +1282,50 @@ const nextMessageStart=postedMessages.length;
 await onMessage({type:"apply",settings:toMotionDocument(freshPreset("circle"))});
 assert(postedMessages.slice(nextMessageStart).some(message=>message.type==="result"),"Apply operation lock is released after invalid input");
 
+// Compare exported scene meaning, retaining every track/key and child order while
+// excluding replaceable host IDs and operational counters. IDs are checked separately.
+function canonicalTrimTracks(tracks:any):any {
+  const result=cloneData(tracks);
+  for(const field of ["PATH_TRIM_START","PATH_TRIM_END"])if(result[field])result[field]=normalizeWrappingPathTrim(result[field]);
+  return result;
+}
+function regressionNodeState(node:any):any {
+  return cloneData({name:node.name,type:node.type,width:node.width,height:node.height,
+    relativeTransform:node.relativeTransform,rotation:node.rotation,opacity:node.opacity,
+    visible:node.visible,layoutPositioning:node.layoutPositioning,effects:node.effects,
+    clipsContent:node.clipsContent,fills:node.fills,
+    tracks:canonicalTrimTracks(node.manualKeyframeTracks),
+    children:(node.children??[]).map(regressionNodeState)});
+}
+function regressionSceneState(cards:any[]):any {
+  const sourceIds=new Set(cards.map(card=>card.id));
+  const serviceIds=new Set(cards.flatMap(card=>JSON.parse(card.getPluginData("orbit-motion")||"{}").serviceIds??[]));
+  const services=parent.children.filter(node=>!sourceIds.has(node.id));
+  assert(services.every(node=>serviceIds.has(node.id)),"Scene contains no unlinked service or leftover output");
+  assert.equal(services.length,serviceIds.size,"Every linked service is attached exactly once");
+  for(const id of serviceIds)assert(nodes.has(id),"Every service link resolves");
+  return {sources:cards.map(regressionNodeState),services:services.map(regressionNodeState),
+    settings:cards.map(card=>JSON.parse(card.getPluginData("orbit-motion")).settings),duration:timeline.duration};
+}
+function regressionSuccessfulResult(start:number,label:string):void {
+  const results=postedMessages.slice(start).filter(message=>message.type==="result");
+  assert.equal(results.length,1,`${label}: one terminal result`);
+  assert.equal(results[0].kind,"success",`${label}: ${results[0].message}`);
+}
+async function regressionClear(cards:any[],authored:any,label:string):Promise<void> {
+  const start=postedMessages.length;
+  await onMessage({type:"clear",scope:"selection"});
+  regressionSuccessfulResult(start,label);
+  assert.deepEqual(cards.map(regressionNodeState),authored,`${label}: complete authored geometry, appearance and internal tracks restored`);
+  assert.deepEqual(parent.children.map(node=>node.id),cards.map(card=>card.id),`${label}: only original cards remain in original order`);
+  const check=(node:any)=>{
+    assert.equal(node.getPluginData("orbit-motion"),"",`${label}: no outer marker`);
+    assert.equal(node.getPluginData("orbit-entry-motion"),"",`${label}: no nested timing marker`);
+    for(const child of node.children??[])check(child);
+  };
+  cards.forEach(check);
+}
+
 // Nested animations through both real exporter paths, including service clones.
 {
   const internalTrack={baseValue:{type:"FLOAT",value:6.2831854820251465},keyframes:[
@@ -1228,20 +1340,34 @@ assert(postedMessages.slice(nextMessageStart).some(message=>message.type==="resu
       {timelinePosition:.8,value:{type:"FLOAT",value:1},easing:{type:"LINEAR"}},
     ]};
     child.manualKeyframeTracks[""]=cloneData(internalTrack);
+    child.manualKeyframeTracks.PATH_TRIM_START={baseValue:{type:"FLOAT",value:0},keyframes:[
+      {timelinePosition:0,value:{type:"FLOAT",value:1.25},easing:{type:"LINEAR"}},
+      {timelinePosition:1.2,value:{type:"FLOAT",value:.25},easing:{type:"LINEAR"}},
+    ]};
     return card;
   };
   const cards=Array.from({length:6},(_,i)=>makeCard(`Nested ${i}`));
   parent.children=cards;for(const card of cards)card.parent=parent;
   globalThis.figma.currentPage.selection=cards;
+  const authoredScene=cards.map(regressionNodeState);
   const originals=cards.map(card=>cloneData(card.children[0].manualKeyframeTracks.OPACITY));
   const run=async(settings:MotionSettings)=>{
     const start=postedMessages.length;await onMessage({type:"apply",settings:toMotionDocument(settings)});
+    regressionSuccessfulResult(start,"Nested Apply/Refresh");
     const errors=postedMessages.slice(start).filter(message=>message.kind==="error");
     assert.equal(errors.length,0,errors.map(message=>message.message).join("\n"));
     const result=postedMessages.slice(start).find(message=>message.type==="result");
-    assert.equal(Boolean(result.warning),settings.other.startOnEntry,"Unsupported timing must be surfaced to the UI");
+    assert.equal(Boolean(result.warning),Boolean(settings.other.startOnEntry||settings.other.loopCardAnimation),"Unsupported timing must be surfaced to the UI");
     const check=node=>{
-      if(node.name.endsWith(" animated content"))assert.deepEqual(node.manualKeyframeTracks[""],internalTrack,"Unsupported track survives native cloning and Refresh");
+      if(node.name.endsWith(" animated content")){
+        assert.deepEqual(node.manualKeyframeTracks[""],internalTrack,"Unsupported track survives native cloning and Refresh");
+        const trim=node.manualKeyframeTracks.PATH_TRIM_START;
+        if(node.getPluginData("orbit-entry-motion"))assert(trim.keyframes.every(key=>key.value.value>=0&&key.value.value<=1),"Generated wrapping path trims are writable through the native API");
+        else assert.deepEqual(canonicalTrimTracks({PATH_TRIM_START:trim}).PATH_TRIM_START,normalizeWrappingPathTrim({baseValue:{type:"FLOAT",value:0},keyframes:[
+          {timelinePosition:0,value:{type:"FLOAT",value:1.25},easing:{type:"LINEAR"}},
+          {timelinePosition:1.2,value:{type:"FLOAT",value:.25},easing:{type:"LINEAR"}},
+        ]}),"Disabled wrapping trim preserves its authored phase and timing");
+      }
       for(const child of node.children??[])check(child);
     };
     cards.forEach(check);
@@ -1250,7 +1376,7 @@ assert(postedMessages.slice(nextMessageStart).some(message=>message.type==="resu
       return marker?JSON.parse(marker).serviceIds:[];
     })))check(nodes.get(id));
   };
-  const orbit=freshPreset("circle");orbit.other.startOnEntry=true;orbit.other.entryOffset=.4;orbit.other.serviceLayers="2";
+  const orbit=freshPreset("orbit-3d-tilted");orbit.other.startOnEntry=true;orbit.other.entryOffset=.4;orbit.other.serviceLayers="2";
   for(let pass=0;pass<2;pass++){
     await run(orbit);
     for(const card of cards){
@@ -1262,12 +1388,29 @@ assert(postedMessages.slice(nextMessageStart).some(message=>message.type==="resu
       const front=poses.find(p=>p.opacity>.001&&Math.abs(p.z-maxZ)<1e-8);
       const expectedStart=front.time+.6;
       const keys=child.manualKeyframeTracks.OPACITY.keyframes;
-      if(expectedStart<orbit.motion.duration)assert(Math.abs(keys[0].timelinePosition-expectedStart)<1e-8,`Nested motion waits for the foreground pose: ${index}, actual ${keys[0].timelinePosition}, expected ${expectedStart}`);
-      else assert(keys.every(key=>key.value.value===originals[index].keyframes[0].value.value),"An offset beyond the seam keeps the returning card at its initial state");
+      const probe=(expectedStart+.3)%orbit.motion.duration;
+      assert(Math.abs(sampleTrack(child.manualKeyframeTracks.OPACITY,probe)-.5)<1e-6,`Nested motion replays at the foreground pose across the seam: ${index}`);
+      assert(Math.abs(sampleTrack(child.manualKeyframeTracks.OPACITY,0)-sampleTrack(child.manualKeyframeTracks.OPACITY,orbit.motion.duration))<1e-6,"Trajectory replay wraps continuously");
       const marker=JSON.parse(card.getPluginData("orbit-motion"));
       for(const id of marker.serviceIds){const service=nodes.get(id);assert.deepEqual(service.children[0].manualKeyframeTracks.OPACITY,child.manualKeyframeTracks.OPACITY,"Depth copies stay synchronized on Apply/Refresh");}
     }
   }
+  // Independent loops exercise actual exporter wiring, not only track helpers.
+  orbit.other.loopCardAnimation=true;orbit.other.startOnEntry=false;
+  let repeatedOrbit;
+  for(let pass=0;pass<2;pass++){
+    await run(orbit);
+    const tracks=cards.map(card=>cloneData(card.children[0].manualKeyframeTracks.OPACITY));
+    if(repeatedOrbit)assert.deepEqual(tracks,repeatedOrbit,"Loop Refresh retains the authored period");else repeatedOrbit=tracks;
+    for(const card of cards){
+      const track=card.children[0].manualKeyframeTracks.OPACITY;
+      const period=orbit.motion.duration/Math.max(1,Math.round(orbit.motion.duration/1.2));
+      for(const cycle of [0,1,2,3,4].filter(cycle=>(cycle+.5/1.2)*period<orbit.motion.duration))assert(Math.abs(sampleTrack(track,(cycle+.5/1.2)*period)-.5)<1e-6,"All card tracks share the fitted duration, including wrapping trims");
+      for(const id of JSON.parse(card.getPluginData("orbit-motion")).serviceIds)
+        assert.deepEqual(nodes.get(id).children[0].manualKeyframeTracks.OPACITY,track);
+    }
+  }
+  orbit.other.loopCardAnimation=false;
   orbit.other.startOnEntry=false;await run(orbit);
   cards.forEach((card,index)=>assert.deepEqual(card.children[0].manualKeyframeTracks.OPACITY,originals[index]));
   orbit.other.startOnEntry=true;await run(orbit);
@@ -1304,6 +1447,20 @@ assert(postedMessages.slice(nextMessageStart).some(message=>message.type==="resu
   const seamEnd=seamState(stack.motion.duration),seamStart=seamState(0);
   assert.deepEqual(seamEnd.map(item=>item.name),seamStart.map(item=>item.name));
   seamEnd.forEach((item,index)=>assert(Math.abs(item.value-seamStart[index].value)<1e-6,`Stack duplicate matches initial nested state at the loop seam: ${JSON.stringify({seamEnd,seamStart})}`));
+  for(const model of [row,stack]){
+    model.other.loopCardAnimation=true;model.other.startOnEntry=false;
+    await run(model);await run(model);
+    for(const card of cards){
+      const root=nodes.get(JSON.parse(card.getPluginData("orbit-motion")).serviceIds[0]);
+      for(const slot of root.children.filter(slot=>slot.name.startsWith(card.name))){
+        const track=slot.children.at(-1).children[0].manualKeyframeTracks.OPACITY;
+        const period=model.motion.duration/Math.max(1,Math.round(model.motion.duration/1.2));
+        for(const cycle of [0,1,2].filter(cycle=>(cycle+.5/1.2)*period<model.motion.duration))assert(Math.abs(sampleTrack(track,(cycle+.5/1.2)*period)-.5)<1e-6,"Row and Stack instances repeat at the fitted duration including trims");
+      }
+    }
+    model.other.loopCardAnimation=false;model.other.startOnEntry=true;
+    await run(model);
+  }
   row.other.startOnEntry=false;await run(row);
   for(const [index,card] of cards.entries()){
     const root=nodes.get(JSON.parse(card.getPluginData("orbit-motion")).serviceIds[0]);
@@ -1317,9 +1474,108 @@ assert(postedMessages.slice(nextMessageStart).some(message=>message.type==="resu
   assert.equal(cards[1].getPluginData("orbit-motion"),"");
   cards[1].locked=false;
   await run(orbit);
-  await onMessage({type:"clear",scope:"selection"});
+  await regressionClear(cards,authoredScene,"Nested initial Clear");
+  // Retiming must be derived from the authored tracks, never the previous output.
+  // Exercise both exporter directions, timing option combinations, signed offsets,
+  // and changing depth-copy counts. Compare full A scenes, not only a few probes.
+  const variants=[
+    {start:false,loop:false,offset:0,services:"0",native:"reference-carousel-05",nativeFirst:false},
+    {start:true,loop:false,offset:-.35,services:"2",native:"reference-stack-01",nativeFirst:true},
+    {start:false,loop:true,offset:.4,services:"4",native:"reference-carousel-05",nativeFirst:true},
+    {start:true,loop:true,offset:.4,services:"5",native:"reference-stack-01",nativeFirst:false},
+  ];
+  for(const variant of variants){
+    const trajectory=freshPreset("orbit-3d-tilted");
+    Object.assign(trajectory.other,{startOnEntry:variant.start,loopCardAnimation:variant.loop,
+      entryOffset:variant.offset,serviceLayers:variant.services});
+    const native=freshPreset(variant.native,trajectory);
+    const [a,b]=variant.nativeFirst?[native,trajectory]:[trajectory,native];
+    const label=JSON.stringify(variant);
+    await run(a);const initial=regressionSceneState(cards);
+    await run(b);regressionSceneState(cards);
+    await run(a);
+    assert.deepEqual(regressionSceneState(cards),initial,`A→B→A scene equivalence: ${label}`);
+    await run(a);
+    assert.deepEqual(regressionSceneState(cards),initial,`Repeated A update is stable: ${label}`);
+    await regressionClear(cards,authoredScene,`Variant Clear ${label}`);
+  }
+  console.log("Nested scene regression: A→B→A, repeat updates, four timing modes, signed offsets, depth counts and complete Clear passed");
   cards.forEach((card,index)=>assert.deepEqual(card.children[0].manualKeyframeTracks.OPACITY,originals[index],"Clear preserves internal animation"));
   assert(cards.every(card=>!card.children[0].getPluginData("orbit-entry-motion")));
   cards.forEach(card=>assert.deepEqual(card.children[0].manualKeyframeTracks[""],internalTrack,"Clear preserves unsupported track"));
   console.log("Nested exporter integration: Orbit, depth copies, native Row, Refresh, toggle off and Clear passed");
 }
+
+
+// A failed Apply can leave opacity keys without an ownership marker.
+{
+ const card=makeNode("Interrupted FLOW");card.opacity=0;
+ parent.children=[card];card.parent=parent;globalThis.figma.currentPage.selection=[card];
+ const motion=freshPreset("circle");motion.other.serviceLayers="0";
+ card.manualKeyframeTracks.OPACITY={baseValue:{type:"FLOAT",value:1},keyframes:[{timelinePosition:0,value:{type:"FLOAT",value:0},easing:{type:"LINEAR"}}]};
+ let start=postedMessages.length;
+ await onMessage({type:"apply",settings:toMotionDocument(motion)});
+ assert(!postedMessages.slice(start).some(message=>message.kind==="error"));
+ assert.equal(JSON.parse(card.getPluginData("orbit-motion")).baseOpacity,1,"Markerless Refresh recovers resting opacity from the existing track");
+ await onMessage({type:"clear",scope:"selection"});
+ assert.equal(card.opacity,1,"Clear restores visibility after interrupted Apply");
+ card.opacity=.8;card.manualKeyframeTracks.OPACITY={baseValue:{type:"FLOAT",value:.35},keyframes:[{timelinePosition:0,value:{type:"FLOAT",value:0},easing:{type:"LINEAR"}}]};
+ await onMessage({type:"apply",settings:toMotionDocument(motion)});
+ assert.equal(JSON.parse(card.getPluginData("orbit-motion")).baseOpacity,.35,"Recovery preserves authored partial opacity");
+ await onMessage({type:"clear",scope:"selection"});
+ assert.equal(card.opacity,.35);
+ card.opacity=0;
+ await onMessage({type:"apply",settings:toMotionDocument(motion)});
+ assert.equal(JSON.parse(card.getPluginData("orbit-motion")).baseOpacity,0,"An intentionally invisible unanimated layer stays invisible");
+ await onMessage({type:"clear",scope:"selection"});
+ assert.equal(card.opacity,0);
+ console.log("Interrupted Apply opacity: markerless Refresh/Clear restore visibility and preserve intentional opacity");
+}
+
+// Share fixture: six 400×460 cards in a 1920×1280 frame. Row ownership
+// samples near time zero can coincide at Figma's microsecond precision.
+{
+  Object.assign(topFrame,{width:1920,height:1280});
+  Object.assign(parent,{width:1920,height:1280});
+  for(const direction of ["up","down","left","right"]){
+    const cards=Array.from({length:6},(_,i)=>makeNode(`Share Row ${direction} ${i}`));
+    for(const [index,card] of cards.entries()){
+      card.width=400;card.height=460;
+      card.relativeTransform=[[1,0,23+index*71],[0,1,47+index*13]];
+      card.opacity=.5+index*.1;
+      card.effects=[cloneData(userBlur)];
+    }
+    parent.children=cards;globalThis.figma.currentPage.selection=cards;
+    const authoredScene=cards.map(regressionNodeState);
+    let firstScene;
+    const row=freshPreset("reference-carousel-05");
+    row.reference={...row.reference,direction,visible:6};
+    for(let pass=0;pass<3;pass++){
+      const start=postedMessages.length;
+      await onMessage({type:"apply",settings:toMotionDocument(row)});
+      regressionSuccessfulResult(start,`Share Row ${direction} update ${pass}`);
+      const scene=regressionSceneState(cards);
+      if(pass===0)firstScene=scene;
+      else assert.deepEqual(scene,firstScene,`Share Row ${direction}: repeated Apply preserves full exported scene`);
+      const error=postedMessages.slice(start).find(m=>m.kind==="error");
+      assert(!error,`Six-card Row ${direction}, pass ${pass}: ${error?.message}`);
+      const root=parent.children.find(node=>node.name.includes("Orbit native"));
+      for(const slot of root.children){
+        const keys=slot.children.at(-1).manualKeyframeTracks.OPACITY.keyframes;
+        assert(keys.every(key=>key.timelinePosition>=0),"Artwork must never precede time zero");
+        for(let i=1;i<keys.length;i++)assert(Math.round(keys[i].timelinePosition*1e6)>Math.round(keys[i-1].timelinePosition*1e6),"Artwork timestamps stay ordered at native precision");
+      }
+    }
+    await regressionClear(cards,authoredScene,`Share Row ${direction} Clear`);
+  }
+  console.log("Share six-card Row: all four directions, Apply/Refresh/Clear and native timestamp precision passed");
+}
+
+await (await import("./carousel-native.test-cases")).runCarouselNativeRegressions({
+  makeNode,parent,topFrame,onMessage,nodes,postedMessages,sampleTrack,cloneData,
+  setNativePrecision:(enabled:boolean)=>{nativeTimelinePrecision=enabled;},
+});
+
+// Busy/error completion integration cases (separate from scene regression coverage).
+const { runCompletionErrorTests } = await import("./completion-error.test-cases");
+await runCompletionErrorTests({onMessage,postedMessages,makeNode,parent,nodes,freshPreset});

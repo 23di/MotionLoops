@@ -112,7 +112,7 @@ for(const preset of referencePresets){
   assert.deepEqual(parseSettingsJson(serializeSettingsJson(settings),freshPreset("orbit-3d-ring")),settings,`${preset.label}: JSON round trip from another family`);
   const quick=schema.quickControls??[],paths=schema.controls??[];
   assert(quick.every(path=>paths.includes(path)),`${preset.label}: quick controls are shortcuts to full controls`);
-  assert.deepEqual(paths.filter(path=>path.startsWith("reference.")).sort(),Object.keys(referenceDefaults(preset.id)).map(key=>`reference.${key}`).sort(),`${preset.label}: every active parameter has a full control`);
+  assert.deepEqual(paths.filter(path=>path.startsWith("reference.")).sort(),Object.keys(referenceDefaults(preset.id)).filter(key=>key!=="cornerRadius").map(key=>`reference.${key}`).sort(),`${preset.label}: every active parameter has a full control`);
   assert(schema.sections?.find(section=>section.id==="other")?.paths.includes("other.copyJson"));
   assert(!schema.quickControls?.some(path=>path.includes("Json")));
   const saved=Object.fromEntries(Object.entries(settings.reference!).map(([key,value])=>[`reference.${key}`,value]));

@@ -200,7 +200,11 @@ export function planPresetConversion(node: ConversionNode, allowedFields: Readon
 }
 
 const state = (node: ConversionNode) => copy({ styles: node.animationStyles, tracks: node.manualKeyframeTracks, timelines: node.timelines });
-export const trackContents = (track: ManualKeyframeTrackInput): ManualKeyframeTrackInput => copy({ baseValue: track.baseValue, keyframes: track.keyframes.map(({ timelinePosition, easing, value }) => ({ timelinePosition, easing, value })) });
+// Native readback adds a redundant identity Bézier to LINEAR keys. It has no
+// effect on playback, but clipped loop segments may omit it when written.
+export const trackContents = (track: ManualKeyframeTrackInput): ManualKeyframeTrackInput => copy({ baseValue: track.baseValue, keyframes: track.keyframes.map(({ timelinePosition, easing, value }) => ({
+  timelinePosition, easing:easing?.type==="LINEAR"?{type:"LINEAR"}:easing, value,
+})) });
 
 // Desktop can defer Motion readback until the next event-loop turn, even though
 // the write methods are synchronous. Flush before verification AND rollback.

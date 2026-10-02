@@ -48,14 +48,14 @@ export function PresetEditor({settings,onChange,theme,panelId,shapeEditor,diagno
     "other.scope","other.centerBeforeApply","other.serviceLayers",
     "other.copyJson","other.pasteJson","other.resetSettings",
   ].includes(control.path));
-  const entryControls=leaves.filter(control=>control.path==="other.startOnEntry"||
+  const entryControls=leaves.filter(control=>control.path==="other.startOnEntry"||control.path==="other.loopCardAnimation"||
     settings.other.startOnEntry&&control.path==="other.entryOffset").map(control=>({...control,
-      label:control.path==="other.startOnEntry"?"Start when card is main":"Offset (s)",
+      label:control.path==="other.startOnEntry"?"Start when card is main":control.path==="other.loopCardAnimation"?"Loop card animation":"Offset (s)",
       ...(control.path==="other.entryOffset"?{min:-5,max:5,step:.01}:{})}));
   const renderControls=(controls:ControlMeta[])=>controls.map(control=>{
     const sizeLocked=adaptiveEnabled&&["parameters.cardSize","parameters.shape_cardSize"].includes(control.path);
     return <div key={control.path} className={[control.path==="parameters.easing"?"motion-easing":"",control.path==="other.entryOffset"?"entry-offset":"",sizeLocked?"orbit-control-disabled":""].filter(Boolean).join(" ")||undefined}
-      title={control.path==="other.startOnEntry"?"Start animations inside each card when it becomes the front or central card.":control.path==="other.entryOffset"?"Negative starts earlier; positive starts later. Double-press the handle to reset to zero.":undefined}
+      title={control.path==="other.startOnEntry"?"Start animations inside each card when it becomes the front or central card.":control.path==="other.loopCardAnimation"?"Repeat animations inside each card. Independent loops fit whole cycles into the scene duration. Start when card is main restarts the authored loop on each visit.":control.path==="other.entryOffset"?"Negative starts earlier; positive starts later. Double-press the handle to reset to zero.":undefined}
       inert={sizeLocked} aria-disabled={sizeLocked}>
     {control.type==="slider"&&!(["rfStack","rfCarousel"].includes(document.model)&&control.path==="parameters.visible")
       ?<DialKitRangeOverride panelId={panelId} control={control} values={values}

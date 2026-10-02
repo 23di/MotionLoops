@@ -34,7 +34,7 @@ const panelId = "orbit-motion-controls-v8";
 const legacyPanelId = "orbit-motion-controls-v7";
 
 const builtInPresetSchemaKey = "orbit-built-in-preset-schema";
-const builtInPresetSchemaVersion = "24";
+const builtInPresetSchemaVersion = "25";
 let builtInPresetSchemaMigratedInSession = false;
 
 function migrateLegacyDialkitStorage(): void {
@@ -572,9 +572,9 @@ function OrbitPreview({
   const [previewSize, setPreviewSize] = useState({ width: 328, height: 180 });
   const [pinned, setPinned] = useState(() => {
     try {
-      return window.localStorage.getItem("orbit-motion-preview-pinned") === "true";
+      return window.localStorage.getItem("orbit-motion-preview-pinned") !== "false";
     } catch {
-      return false;
+      return true;
     }
   });
   const time = usePreviewTime(settings.motion.duration);

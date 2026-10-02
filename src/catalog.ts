@@ -76,7 +76,7 @@ function presetSettings(id: PresetId, previous?: MotionSettings): MotionSettings
     appearance: { cardSize: 58, sizeBasis:"standard", adaptiveSize:true, nearScale: 1.25, farScale: 0.55, farOpacity: 0.28, fadeStart: 0, fadeEnd: 100,
       opacityCurve: "linear", facePath: false, farBlur: 0, frontShadow: 0, ...tuning.appearance },
     other: { centerBeforeApply: previous?.other.centerBeforeApply ?? true,
-      startOnEntry: previous?.other.startOnEntry ?? false, entryOffset: previous?.other.entryOffset ?? 0,
+      startOnEntry: previous?.other.startOnEntry ?? true, loopCardAnimation: previous?.other.loopCardAnimation ?? false, entryOffset: previous?.other.entryOffset ?? 0,
       scope: previous?.other.scope ?? "selection", serviceLayers: "4", ...tuning.other },
   };
 }
@@ -97,7 +97,7 @@ export function motionFingerprint(settings: MotionSettings): string {
   const document=toMotionDocument(settings);
   const {keyframes:_samples,...parameters}=document.parameters;
   const normalized = {model:document.model,parameters,
-    startOnEntry:document.other.startOnEntry??false,entryOffset:document.other.entryOffset??0};
+    startOnEntry:document.other.startOnEntry??false,loopCardAnimation:document.other.loopCardAnimation??false,entryOffset:document.other.entryOffset??0};
   return JSON.stringify(normalized, (_key, value) => value && typeof value === "object" && !Array.isArray(value)
     ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b))) : value);
 }

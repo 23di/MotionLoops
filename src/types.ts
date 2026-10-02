@@ -136,6 +136,7 @@ export interface MotionSettings {
   };
   other: {
     startOnEntry?: boolean;
+    loopCardAnimation?: boolean;
     entryOffset?: number;
     centerBeforeApply: boolean;
     serviceLayers: ServiceLayerCount;

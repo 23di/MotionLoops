@@ -4,6 +4,8 @@ import { readFileSync } from "node:fs";
 import { prepareNestedMotion, applyNestedMotion, applyNestedMotionBatch, nestedShift, restoreNestedMotion,
   visibilityWindows, mergeVisibilityWindows, entryForInstance, collectManualTracks, captureNestedState, nestedMotionNotice, mainCardStarts, mainPoseTime, retimeNestedTrack, loopRewindTimes, mainCardOccurrences, periodicNestedTrack } from "./nested-motion";
 import { trackContents, planPresetConversion } from "./preset-conversion";
+import { mainPoseOccurrences, normalizeWrappingPathTrim, fittedNestedLoop } from "./nested-motion";
+import { fitSettingsToFrame, generateNodeKeyframes } from "./engine";
 import { freshPreset, motionFingerprint } from "./catalog";
 import { toMotionDocument, fromMotionDocument, validateMotionDocument, documentFromValues, documentValues } from "./motion-system";
 import { parseSettingsJson, serializeSettingsJson } from "./settings-json";
@@ -225,6 +227,7 @@ function sample(keys,time){
   if(time<=keys[0].timelinePosition)return keys[0].value.value;
   const end=keys.findIndex(key=>key.timelinePosition>=time);
   if(end<0)return keys.at(-1).value.value;
+  if(time===keys[end].timelinePosition)return keys[end].value.value;
   const a=keys[end-1],b=keys[end],p=(time-a.timelinePosition)/(b.timelinePosition-a.timelinePosition);
   if(b.easing.type==="HOLD")return a.value.value;
   const curve=b.easing.easingFunctionCubicBezier;
@@ -391,3 +394,395 @@ assert.deepEqual(mainCardOccurrences([
  {source:1,layer:1,frames:[vf(0,1),vf(1,1),vf(9,1),vf(10,1)]},
 ],2,10,"front").map(list=>list.map(event=>event.start)),[[9],[1]],"Do not add a fake second start at time zero");
 console.log("Nested repeated foreground: no last-card pause, continuous linear/cubic seam passed");
+
+// Orbit 01 cards remain visible in the rear: the timeline seam is not a reset.
+const revealTrack=track(0,1.2);
+let reproducedSeam=false;
+for(const turns of [1,2])for(let index=0;index<6;index++){
+ const orbit=freshPreset("orbit-3d-tilted");orbit.geometry.turns=turns;
+ const fitted=fitSettingsToFrame(orbit,1920,1280,400,460,6);
+ const frames=generateNodeKeyframes({...fitted,motion:{...fitted.motion,keyframes:32}},index,6);
+ const occurrences=mainPoseOccurrences(frames,orbit.motion.duration);
+ assert.equal(occurrences.length,turns,"Replay every foreground visit, including multiple turns");
+ const old=retimeNestedTrack(revealTrack,mainPoseTime(frames,orbit.motion.duration),orbit.motion.duration,orbit.motion.duration);
+ if(Math.abs(sample(old.keyframes,orbit.motion.duration-1e-4)-sample(old.keyframes,0))>1)reproducedSeam=true;
+ for(const offset of [-.2,0,.2]){
+  const replay=periodicNestedTrack(revealTrack,occurrences,offset,orbit.motion.duration);
+  assert(Math.abs(sample(replay.keyframes,0)-sample(replay.keyframes,orbit.motion.duration))<1e-6,"Orbit inner state is continuous across the loop seam");
+  for(const occurrence of occurrences){
+   const probe=(occurrence.start+offset+.6+orbit.motion.duration)%orbit.motion.duration;
+   assert(Math.abs(sample(replay.keyframes,probe)-50)<1e-5,"Every foreground visit advances the 1.2 second reveal");
+  }
+ }
+}
+assert(reproducedSeam,"Real Orbit 01 geometry reproduces the previous loop reset");
+assert.equal(freshPreset("orbit-3d-tilted").other.startOnEntry,true);
+const explicitlyDisabled=freshPreset("circle");explicitlyDisabled.other.startOnEntry=false;
+assert.equal(freshPreset("orbit-3d-tilted",explicitlyDisabled).other.startOnEntry,false,"Preserve an explicit opt-out when switching presets");
+console.log("Orbit 01 nested replay: reproduced old seam, six cards, multiple turns and offsets passed");
+
+// Desktop fills in LINEAR Bézier metadata when a rotating loop crosses the seam.
+const nativeLinear=node(),nativeLinearRoot=node([nativeLinear]);
+nativeLinear.manualKeyframeTracks.ROTATION={baseValue:{type:"FLOAT",value:0},keyframes:
+ Array.from({length:25},(_,i)=>key(i*.05,-9*Math.cos(2*Math.PI*(i===24?0:i/24))))};
+const nativeLinearOriginal=copy(nativeLinear.manualKeyframeTracks.ROTATION);
+const nativeLinearWrite=nativeLinear.applyManualKeyframeTrack;
+nativeLinear.applyManualKeyframeTrack=function(field,input){
+ const canonical=copy(input);
+ for(const k of canonical.keyframes)if(k.easing?.type==="LINEAR")k.easing.easingFunctionCubicBezier={x1:0,y1:0,x2:1,y2:1};
+ nativeLinearWrite.call(this,field,canonical);
+};
+for(let pass=0;pass<2;pass++){
+ const [snapshot]=await prepareNestedMotion([nativeLinearRoot],true);
+ await applyNestedMotionBatch([{rootId:nativeLinearRoot.id,snapshot,shift:5.4375,enabled:true,occurrences:[{start:5.4375,reset:.75}],offset:0,loopEnd:6}]);
+ const expected=periodicNestedTrack(nativeLinearOriginal,[{start:5.4375,reset:.75}],0,6);
+ assert.deepEqual(trackContents(nativeLinear.manualKeyframeTracks.ROTATION),trackContents(expected),"Native LINEAR metadata preserves the actual motion");
+}
+await restoreNestedMotion(nativeLinearRoot);
+assert.deepEqual(trackContents(nativeLinear.manualKeyframeTracks.ROTATION),trackContents(nativeLinearOriginal),"Clear restores authored rotation after native normalization");
+console.log("Native FORM rotation: LINEAR readback normalization, Refresh and Clear passed");
+
+// Explicit opt-in repeats the entire authored card timeline, including delays.
+const loopingReveal=periodicNestedTrack(track(0,1.2),[{start:9,reset:8}],0,10,1.2);
+assert(Math.abs(sample(loopingReveal.keyframes,9.6)-50)<1e-5);
+assert(Math.abs(sample(loopingReveal.keyframes,.8)-50)<1e-5,"Second inner cycle continues across the outer seam");
+assert(Math.abs(sample(loopingReveal.keyframes,0)-sample(loopingReveal.keyframes,10))<1e-6);
+assert.equal(sample(periodicNestedTrack(track(0,1.2),[{start:9,reset:8}],0,10).keyframes,.8),100,"Default remains one-shot");
+const short=node(),long=node(),repeatRoot=node([short,long]);
+short.manualKeyframeTracks.OPACITY=track(.2,.8);long.manualKeyframeTracks.TRANSLATION_X=track(0,1.2);
+const shortOriginal=copy(short.manualKeyframeTracks.OPACITY),longOriginal=copy(long.manualKeyframeTracks.TRANSLATION_X);
+let firstRepeat;
+for(let pass=0;pass<2;pass++){
+ const [snapshot]=await prepareNestedMotion([repeatRoot],true);
+ await applyNestedMotionBatch([{rootId:repeatRoot.id,snapshot,shift:0,enabled:true,repeat:true,loopEnd:6}]);
+ const actual=trackContents(short.manualKeyframeTracks.OPACITY);
+ if(firstRepeat)assert.deepEqual(actual,firstRepeat,"Refresh does not accumulate generated repeats");else firstRepeat=actual;
+ for(const cycle of [0,1,2,3,4]){
+  assert(Math.abs(sample(actual.keyframes,cycle*1.2+.5)-50)<1e-5,"Tracks share the card duration and preserve their initial delay");
+  assert.equal(sample(actual.keyframes,cycle*1.2+1),100,"Shorter tracks hold until the shared restart");
+ }
+}
+const [oneShotSnapshot]=await prepareNestedMotion([repeatRoot],true);
+await applyNestedMotionBatch([{rootId:repeatRoot.id,snapshot:oneShotSnapshot,shift:0,enabled:true,repeat:false,loopEnd:6}]);
+assert.deepEqual(trackContents(short.manualKeyframeTracks.OPACITY),shortOriginal,"Toggle off restores authored timing");
+const [again]=await prepareNestedMotion([repeatRoot],true);
+await applyNestedMotionBatch([{rootId:repeatRoot.id,snapshot:again,shift:0,enabled:true,repeat:true,loopEnd:6}]);
+await restoreNestedMotion(repeatRoot);
+assert.deepEqual(trackContents(short.manualKeyframeTracks.OPACITY),shortOriginal);
+assert.deepEqual(trackContents(long.manualKeyframeTracks.TRANSLATION_X),longOriginal,"Clear restores original duration, not expanded keys");
+assert.equal(freshPreset("circle").other.loopCardAnimation,false);
+const loopSettings=freshPreset("circle");loopSettings.other.loopCardAnimation=true;
+assert.equal(freshPreset("reference-stack-01",loopSettings).other.loopCardAnimation,true);
+assert.deepEqual(parseSettingsJson(serializeSettingsJson(loopSettings),freshPreset("circle")).other,loopSettings.other);
+assert.notEqual(motionFingerprint(loopSettings),motionFingerprint(freshPreset("circle")));
+const oldLoop=toMotionDocument(loopSettings);delete oldLoop.other.loopCardAnimation;
+assert.equal(validateMotionDocument(oldLoop).other.loopCardAnimation,false);
+const invalidLoop=toMotionDocument(loopSettings);invalidLoop.other.loopCardAnimation="true";
+assert.throws(()=>validateMotionDocument(invalidLoop),/entry timing/);
+assert.throws(()=>periodicNestedTrack(track(0,1e-6),[{start:1,reset:0}],0,10,1e-6),/too short/);
+console.log("Loop card animation: shared duration/delays, continuous foreground seam, opt-in, Refresh, toggle off, Clear and saved settings passed");
+const shortCurve=track(.2,1.2);shortCurve.keyframes[1].easing={type:"CUSTOM_CUBIC_BEZIER",easingFunctionCubicBezier:{x1:.3,y1:.1,x2:.65,y2:.9}};
+const tiledCurve=periodicNestedTrack(shortCurve,[{start:9,reset:8}],0,10,1.2);
+for(let t=.03;t<.18;t+=.03)assert(Math.abs(sample(tiledCurve.keyframes,t)-sample(shortCurve.keyframes,t+1))<1e-6,"Cubic clipping across the outer seam preserves easing");
+for(let t=.45;t<1.1;t+=.07)assert(Math.abs(sample(tiledCurve.keyframes,t)-sample(shortCurve.keyframes,t-.2))<1e-6,"Every repeated cubic retains its easing");
+
+
+// Authored 4834 reveal easing: Loop On / offset -0.40 can produce a
+// sub-microsecond boundary fragment with almost zero dy, not a turning point.
+const nativeReveal=track(0,.7);
+nativeReveal.keyframes[1].easing={type:"CUSTOM_CUBIC_BEZIER",easingFunctionCubicBezier:{x1:.2199999988079071,y1:1,x2:.36000001430511475,y2:1}};
+for(const start of [4,5.2,15.3,16.5,17.7]){
+ const replay=periodicNestedTrack(nativeReveal,[{start,reset:start-2.3}],-.4,18,1.2);
+ assert(replay.keyframes.every(k=>Number.isFinite(k.timelinePosition)&&k.timelinePosition>=0&&k.timelinePosition<=18));
+ assert(replay.keyframes.every((k,i)=>i===0||Math.round(k.timelinePosition*1e6)>Math.round(replay.keyframes[i-1].timelinePosition*1e6)),`Signed offset is representable at native microsecond precision: start=${start}`);
+ for(let time=.013;time<18;time+=.037){
+  const age=((time-(start-.4))%18+18)%18;
+  const phase=age%1.2;
+  const expected=age>=18-1.9?0:sample(nativeReveal.keyframes,phase);
+  assert(Math.abs(sample(replay.keyframes,time)-expected)<1e-8,`Signed offset preserves the authored cubic playback, including the flat tail: start=${start} time=${time}`);
+ }
+}
+// Equal endpoints with a real non-flat excursion cannot be replaced by HOLD
+// or LINEAR. Retain the explicit representability error.
+const excursion=track(0,1);
+excursion.keyframes[1].easing={type:"CUSTOM_CUBIC_BEZIER",easingFunctionCubicBezier:{x1:1/3,y1:1,x2:2/3,y2:-4/3}};
+assert.throws(()=>periodicNestedTrack(excursion,[{start:0,reset:0},{start:.50001,reset:.50001}],0,1),/turning point crosses the loop seam/);
+console.log("Native flat cubic tail: signed loop offset preserves playback; genuine excursions still reject");
+
+// Desktop permits wrapping path trims that its public write API rejects.
+const wrappedPath=node(),wrappedRoot=node([wrappedPath]);
+wrappedPath.manualKeyframeTracks.PATH_TRIM_START={baseValue:{type:"FLOAT",value:0},keyframes:[key(0,1.25),key(1.2,.25)]};
+wrappedPath.manualKeyframeTracks.PATH_TRIM_END={baseValue:{type:"FLOAT",value:1},keyframes:[key(0,.5),key(1.2,1.5)]};
+wrappedPath.manualKeyframeTracks.OPACITY=track(0,1.2);
+const wrappedStart=copy(wrappedPath.manualKeyframeTracks.PATH_TRIM_START),wrappedEnd=copy(wrappedPath.manualKeyframeTracks.PATH_TRIM_END);
+const untouchedTrimRecovery=await captureNestedState([wrappedRoot]);
+await untouchedTrimRecovery();
+assert.deepEqual(wrappedPath.manualKeyframeTracks.PATH_TRIM_START,wrappedStart,"Unchanged rollback retains the authored 125% notation");
+assert.deepEqual(wrappedPath.manualKeyframeTracks.PATH_TRIM_END,wrappedEnd,"Unchanged rollback retains the authored 150% notation");
+const wrappedWrite=wrappedPath.applyManualKeyframeTrack;
+wrappedPath.applyManualKeyframeTrack=function(field,input){
+ if(["PATH_TRIM_START","PATH_TRIM_END"].includes(field.name)&&input.keyframes.some(key=>key.value.value<0||key.value.value>1))throw new Error("path trim must be less than or equal to 1");
+ return wrappedWrite.call(this,field,input);
+};
+for(let pass=0;pass<2;pass++){
+ const [snapshot]=await prepareNestedMotion([wrappedRoot],true);
+ assert.equal(snapshot.unsupported.length,0);
+ assert.equal(nestedMotionNotice([snapshot]),"");
+ await applyNestedMotionBatch([{rootId:wrappedRoot.id,snapshot,shift:0,enabled:true,repeat:true,loopEnd:5}]);
+ for(const [field,authored] of [["PATH_TRIM_START",wrappedStart],["PATH_TRIM_END",wrappedEnd]]){
+  const actual=wrappedPath.manualKeyframeTracks[field];
+  assert(actual.keyframes.every(k=>k.value.value>=0&&k.value.value<=1));
+  for(let t=.013;t<4.99;t+=.017){
+   const phase=(t%1.25)*1.2/1.25;
+   if(phase<.00002||1.2-phase<.00002)continue;
+   const diff=sample(actual.keyframes,t)-sample(authored.keyframes,phase);
+   assert(Math.abs(diff-Math.round(diff))<2e-5,"Wrapping trims repeat their authored visible phase");
+  }
+ }
+ assert(wrappedPath.manualKeyframeTracks.OPACITY.keyframes.length>2,"Other inner tracks still loop");
+}
+await restoreNestedMotion(wrappedRoot);
+assert.deepEqual(trackContents(wrappedPath.manualKeyframeTracks.PATH_TRIM_START),normalizeWrappingPathTrim(wrappedStart));
+assert.deepEqual(trackContents(wrappedPath.manualKeyframeTracks.PATH_TRIM_END),normalizeWrappingPathTrim(wrappedEnd));
+assert.deepEqual(trackContents(wrappedPath.manualKeyframeTracks.OPACITY),track(0,1.2));
+assert.equal(collectManualTracks({PATH_TRIM_START:track(0,1.2)}).length,1);
+assert.equal(collectManualTracks({PATH_TRIM_START:{baseValue:{type:"FLOAT",value:0},keyframes:[key(0,0),key(1.2,1)]}}).length,1,"Valid path trims remain editable");
+console.log("Native wrapping path trims: Apply/Refresh repeat visible phases and Clear restores authored timing");
+
+// Independent phase oracle for all six tracks on the exact reported FLOW.
+const {share4909AuthoredCards}=await import("./test-fixtures/share-4909-authored-cards");
+const flowFixture=share4909AuthoredCards.find(card=>card.name==="02 / FLOW");
+const flowTracks=[];
+const collectFlow=layer=>{
+ for(const field of ["PATH_TRIM_START","PATH_TRIM_END"])if(layer.tracks[field])flowTracks.push({field,input:layer.tracks[field]});
+ for(const child of layer.children??[])collectFlow(child);
+};collectFlow(flowFixture);
+assert.equal(flowTracks.length,6);
+const phaseError=(a,b)=>Math.abs((a-b)-Math.round(a-b));
+const flowChildren=flowTracks.map(({field,input})=>{
+ const child=node();child.manualKeyframeTracks[field]=copy(input);
+ const write=child.applyManualKeyframeTrack;
+ child.applyManualKeyframeTrack=function(field,input){
+  assert([...input.keyframes.map(k=>k.value.value),input.baseValue?.value??0].every(v=>v>=0&&v<=1),"Exact FLOW writes obey native trim validation");
+  return write.call(this,field,input);
+ };return child;
+});
+const flowRoot=node(flowChildren);let flowFirst;
+for(let pass=0;pass<2;pass++){
+ const [snapshot]=await prepareNestedMotion([flowRoot],true);
+ assert.equal(snapshot.unsupported.length,0);
+ await applyNestedMotionBatch([{rootId:flowRoot.id,snapshot,enabled:true,repeat:true,shift:0,loopEnd:6}]);
+ const actual=flowChildren.map((child,i)=>trackContents(child.manualKeyframeTracks[flowTracks[i].field]));
+ if(flowFirst)assert.deepEqual(actual,flowFirst,"Exact FLOW Refresh does not accumulate conversions or repeats");else flowFirst=actual;
+ for(let i=0;i<actual.length;i++)for(let time=.0001;time<6;time+=1/120){
+  const expected=sample(flowTracks[i].input.keyframes,time%1.2);
+  assert(phaseError(sample(actual[i].keyframes,time),expected)<2e-5,"All six exact FLOW trims repeat their original visible phase at 120Hz");
+ }
+}
+await restoreNestedMotion(flowRoot);
+for(let i=0;i<flowChildren.length;i++)for(let time=.0001;time<1.2;time+=1/120)
+ assert(phaseError(sample(flowChildren[i].manualKeyframeTracks[flowTracks[i].field].keyframes,time),sample(flowTracks[i].input.keyframes,time))<2e-5,"FLOW Clear restores authored visible phases and timing");
+// Reported native scene: outer 5s cannot wrap a free-running 1.2s inner loop.
+// At 5s the old compiler stopped 0.2s into a new lap, then jumped to phase zero.
+const flowBeforeFit=flowChildren.map((child,i)=>trackContents(child.manualKeyframeTracks[flowTracks[i].field]));
+for(let pass=0;pass<2;pass++){
+ const [snapshot]=await prepareNestedMotion([flowRoot],true);
+ await applyNestedMotionBatch([{rootId:flowRoot.id,snapshot,enabled:true,repeat:true,shift:0,loopEnd:5}]);
+ for(let i=0;i<flowTracks.length;i++){
+  const actual=flowChildren[i].manualKeyframeTracks[flowTracks[i].field];
+  for(let time=.0001;time<5;time+=1/120){
+   const authoredPhase=(time%1.25)*1.2/1.25;
+   assert(phaseError(sample(actual.keyframes,time),sample(flowTracks[i].input.keyframes,authoredPhase))<2e-5,"5s FLOW fits four complete cycles and scales all tracks together");
+  }
+  assert.equal(sample(actual.keyframes,5),sample(actual.keyframes,0),"Every FLOW track returns to exactly the same global-seam pose");
+  // The dark paths are authored as closed loops. The cream path's end trim
+  // changes from 200% to 85%, so its original lap deliberately resets length.
+  if(i>=2)assert(phaseError(sample(actual.keyframes,5-.000002),sample(actual.keyframes,.000002))<2e-5,"Closed dark FLOW paths stay continuous on both sides of the global seam");
+ }
+}
+await restoreNestedMotion(flowRoot);
+flowChildren.forEach((child,i)=>assert.deepEqual(trackContents(child.manualKeyframeTracks[flowTracks[i].field]),flowBeforeFit[i],"Clear recovers 1.2s timing after fitting a 5s scene"));
+const fittedDelay=fittedNestedLoop(shortOriginal,5,1.2);
+for(let cycle=0;cycle<4;cycle++){
+ assert(Math.abs(sample(fittedDelay.keyframes,(cycle+.5/1.2)*1.25)-50)<1e-6,"Shorter reveals and initial delays scale with the whole card");
+ assert.equal(sample(fittedDelay.keyframes,(cycle+1/1.2)*1.25),100,"Shorter tracks still hold until the next fitted lap");
+}
+assert.deepEqual(fittedNestedLoop({keyframes:[]},5,1.2),{keyframes:[]});
+assert.throws(()=>fittedNestedLoop(shortOriginal,Infinity,1.2),/Invalid/);
+console.log("Reported FLOW seam: 5s scene / 1.2s card fits four laps, exact endpoints and 120Hz seam continuity; Refresh/Clear passed");
+const trimCubic={baseValue:{type:"FLOAT",value:0},keyframes:[key(.1,-.25),{...key(1.7,2.25),easing:{type:"CUSTOM_CUBIC_BEZIER",easingFunctionCubicBezier:{x1:.22,y1:0,x2:.75,y2:1}}}]};
+const boundedCubic=normalizeWrappingPathTrim(trimCubic);
+for(let time=.1001;time<1.7;time+=.0017)
+ assert(phaseError(sample(boundedCubic.keyframes,time),sample(trimCubic.keyframes,time))<3e-5,"Wrapping cubic keeps the original curve, including negative trim positions");
+const keyCrossing={keyframes:[key(0,.5),key(.6,1),key(1.2,1.5)]};
+const normalizedCrossing=normalizeWrappingPathTrim(keyCrossing);
+for(let time=.0001;time<1.2;time+=.013)
+ assert(phaseError(sample(normalizedCrossing.keyframes,time),sample(keyCrossing.keyframes,time))<2e-5,"Crossings exactly on authored keys do not tween backwards");
+const springTrim={keyframes:[key(0,.5),{...key(1.2,1.5),easing:{type:"CUSTOM_SPRING",easingFunctionSpring:{mass:1,stiffness:100,damping:10}}}]};
+assert.equal(collectManualTracks({PATH_TRIM_START:springTrim}).length,0,"Unrepresentable wrapping springs remain untouched");
+console.log("Exact FLOW: six native tracks, five repeats at 120Hz, Refresh/Clear, negative/cubic and authored-key crossings passed");
+
+// Real-host storage limit: large originals plus generated tracks cannot occupy
+// one plugin-data entry. Recreate plugin execution with only persisted nodes.
+{
+  const markerKey='orbit-entry-motion';
+  const makeLarge=()=>{
+    const child=node(),root=node([child]);
+    child.manualKeyframeTracks.TRANSLATION_X={baseValue:{type:'FLOAT',value:0},keyframes:Array.from({length:900},(_,i)=>key(i/900,i))};
+    child.manualKeyframeTracks.effects={0:{properties:{['☀️🎬'.repeat(4200)]:track()}}};
+    const storage=new Map();let calls=0,failAt=0,maxBytes=0;
+    child.getPluginData=k=>storage.get(k)??'';
+    child.getPluginDataKeys=()=>[...storage.keys()];
+    child.setPluginData=(k,v)=>{
+      const bytes=Buffer.byteLength(k+v,'utf8');maxBytes=Math.max(bytes,maxBytes);
+      assert.ok(bytes<=100000,`Figma pluginData limit: ${bytes}`);
+      assert.ok(!/^[\uDC00-\uDFFF]/u.test(v)&&!/[\uD800-\uDBFF]$/u.test(v),'Never split surrogate pairs');
+      calls++;if(calls===failAt)throw new Error('storage fault '+calls);
+      if(v)storage.set(k,v);else storage.delete(k);
+    };
+    return {child,root,storage,reset(n=0){calls=0;failAt=n;},get calls(){return calls;},get maxBytes(){return maxBytes;}};
+  };
+  const initial=makeLarge(),original=copy(initial.child.manualKeyframeTracks);
+  let [baseline]=await prepareNestedMotion([initial.root],true);
+  const raw=JSON.stringify({version:1,tracks:baseline.layers[0].tracks.map(({field,input})=>({field,original:input,applied:input}))});
+  assert.ok(Buffer.byteLength(raw)>100000,'Fixture must reproduce old single-entry failure');
+  assert.throws(()=>initial.child.setPluginData(markerKey,raw),/pluginData limit/);
+  initial.reset();await applyNestedMotion(initial.root.id,baseline,2,true);
+  assert.equal(JSON.parse(initial.child.getPluginData(markerKey)).version,2);
+  const firstCalls=initial.calls;
+  for(let i=0;i<4;i++){
+    // All state comes from persisted node data; no baseline survives a restart.
+    const [restarted]=await prepareNestedMotion([initial.root],true);
+    assert.deepEqual(restarted.layers[0].tracks,baseline.layers[0].tracks);
+    await applyNestedMotion(initial.root.id,restarted,3+i,true);
+    assert.equal(initial.child.manualKeyframeTracks.TRANSLATION_X.keyframes[0].timelinePosition,3+i);
+  }
+  const restore=await captureNestedState([initial.root]);
+  const [again]=await prepareNestedMotion([initial.root],true);
+  await applyNestedMotion(initial.root.id,again,9,true);await restore();
+  assert.equal(initial.child.manualKeyframeTracks.TRANSLATION_X.keyframes[0].timelinePosition,6);
+  await restoreNestedMotion(initial.root);
+  assert.deepEqual(collectManualTracks(initial.child.manualKeyframeTracks),collectManualTracks(original));
+  assert.equal(initial.storage.size,0,'Clear removes all marker chunks');
+  // Check every failing plugin-data call, including pointer commit and cleanup,
+  // on first Apply, Refresh and Clear. Cleanup errors may leave unreachable
+  // chunks; subsequent successful operation must collect them.
+  let injected=0;
+  for(const mode of ['apply','refresh','clear']){
+    const probe=makeLarge();const [p]=await prepareNestedMotion([probe.root],true);
+    if(mode!=='apply')await applyNestedMotion(probe.root.id,p,2,true);
+    probe.reset();if(mode==='clear')await restoreNestedMotion(probe.root);else await applyNestedMotion(probe.root.id,p,3,true);
+    const total=probe.calls;
+    for(let fault=1;fault<=total;fault++){
+      const env=makeLarge();const [saved]=await prepareNestedMotion([env.root],true);
+      if(mode!=='apply')await applyNestedMotion(env.root.id,saved,2,true);
+      const before=collectManualTracks(env.child.manualKeyframeTracks);
+      env.reset(fault);let rejected=false;
+      try{if(mode==='clear')await restoreNestedMotion(env.root);else await applyNestedMotion(env.root.id,saved,3,true);}
+      catch(error){assert.match(error.message,/storage fault/);assert.doesNotMatch(error.message,/rollback failed/);rejected=true;}
+      if(rejected)assert.deepEqual(collectManualTracks(env.child.manualKeyframeTracks),before,'Fault rollback restores exact motion');
+      env.reset();const [retry]=await prepareNestedMotion([env.root],true);
+      assert.deepEqual(retry.layers[0].tracks,saved.layers[0].tracks,'Failure never replaces original baseline');
+      await applyNestedMotion(env.root.id,retry,4,true);await restoreNestedMotion(env.root);
+      assert.deepEqual(collectManualTracks(env.child.manualKeyframeTracks),saved.layers[0].tracks);
+      assert.equal(env.storage.size,0,'Retry and Clear collect failed-write chunks');injected++;
+    }
+  }
+  // A plugin killed while staging never publishes the incomplete bank. On
+  // restart a valid baseline remains readable, and the next write collects it.
+  const interrupted=makeLarge();const [stable]=await prepareNestedMotion([interrupted.root],true);
+  await applyNestedMotion(interrupted.root.id,stable,2,true);
+  const active=JSON.parse(interrupted.child.getPluginData(markerKey));
+  interrupted.storage.set(`${markerKey}:${active.bank==='a'?'b':'a'}:999`,'abandoned staging 🎬');
+  const [reopened]=await prepareNestedMotion([interrupted.root],true);
+  assert.deepEqual(reopened.layers[0].tracks,stable.layers[0].tracks);
+  await applyNestedMotion(interrupted.root.id,reopened,3,true);
+  assert.ok(![...interrupted.storage.keys()].some(k=>k.endsWith(':999')));
+  await restoreNestedMotion(interrupted.root);assert.equal(interrupted.storage.size,0);
+  // Every chunk write may invalidate the native handle, just like track writes.
+  const staleLarge=makeLarge(),normalGet=figma.getNodeByIdAsync;let epoch=0;
+  figma.getNodeByIdAsync=async id=>{
+    const current=await normalGet(id);if(id!==staleLarge.child.id)return current;
+    const captured=epoch;
+    return new Proxy(current,{get(target,property){
+      if(property==='setPluginData'||property==='applyManualKeyframeTrack')return (...args)=>{
+        assert.equal(captured,epoch,'Re-resolve the handle for every chunk mutation');
+        const result=target[property](...args);epoch++;return result;
+      };
+      return target[property];
+    }});
+  };
+  try{
+    const [s]=await prepareNestedMotion([staleLarge.root],true);
+    await applyNestedMotion(staleLarge.root.id,s,2,true);
+    await applyNestedMotion(staleLarge.root.id,s,3,true);await restoreNestedMotion(staleLarge.root);
+    assert.equal(staleLarge.storage.size,0);
+  }finally{figma.getNodeByIdAsync=normalGet;}
+  // Unknown historical v2 formats must stop before mutating authored tracks.
+  for(const header of [{version:2,chunks:7},{version:2,bank:'a',count:2,length:100,checksum:0},{version:2,bank:'other',count:1,length:5,checksum:0}]){
+    const legacy=makeLarge(),before=copy(legacy.child.manualKeyframeTracks);
+    legacy.storage.set(markerKey,JSON.stringify(header));
+    await assert.rejects(prepareNestedMotion([legacy.root],true),/saved nested animation timing/);
+    assert.deepEqual(legacy.child.manualKeyframeTracks,before);assert.equal(legacy.calls,0);
+  }
+  // A throwing native pointer commit may nevertheless have changed state.
+  // Rollback must see intact active chunks, then restore the previous baseline.
+  for(const mode of ['apply','refresh','clear']){
+    const uncertain=makeLarge();const [base]=await prepareNestedMotion([uncertain.root],true);
+    if(mode!=='apply')await applyNestedMotion(uncertain.root.id,base,2,true);
+    const before=collectManualTracks(uncertain.child.manualKeyframeTracks),setter=uncertain.child.setPluginData;
+    let pending=true;
+    uncertain.child.setPluginData=(k,v)=>{setter(k,v);if(k===markerKey&&pending){pending=false;throw new Error('commit changed state before throwing');}};
+    await assert.rejects(mode==='clear'?restoreNestedMotion(uncertain.root):applyNestedMotion(uncertain.root.id,base,3,true),error=>
+      /commit changed state/.test(error.message)&&!/rollback failed/.test(error.message));
+    assert.deepEqual(collectManualTracks(uncertain.child.manualKeyframeTracks),before);
+    const [after]=await prepareNestedMotion([uncertain.root],true);assert.deepEqual(after.layers[0].tracks,base.layers[0].tracks);
+    await applyNestedMotion(uncertain.root.id,after,4,true);await restoreNestedMotion(uncertain.root);assert.equal(uncertain.storage.size,0);
+  }
+  for(const dropPointer of [false,true]){
+    const silent=makeLarge();const [base]=await prepareNestedMotion([silent.root],true);
+    await applyNestedMotion(silent.root.id,base,2,true);
+    const before=collectManualTracks(silent.child.manualKeyframeTracks),setter=silent.child.setPluginData;let pending=true;
+    silent.child.setPluginData=(k,v)=>{
+      if(pending&&(dropPointer?k===markerKey:k!==markerKey)&&v){pending=false;return;}
+      setter(k,v);
+    };
+    await assert.rejects(applyNestedMotion(silent.root.id,base,3,true),error=>/did not preserve saved/.test(error.message)&&!/rollback failed/.test(error.message));
+    assert.deepEqual(collectManualTracks(silent.child.manualKeyframeTracks),before);
+    const [after]=await prepareNestedMotion([silent.root],true);assert.deepEqual(after.layers[0].tracks,base.layers[0].tracks);
+    await restoreNestedMotion(silent.root);assert.equal(silent.storage.size,0);
+  }
+  // Corrupt pointer writes are restored from the captured previous pointer,
+  // rather than asking the general rollback path to parse malformed JSON.
+  for(const corruptKind of ['truncated','missing-bank','wrong-bank','corrupt-then-throw'])for(const mode of ['apply','refresh','clear']){
+    const corrupt=makeLarge();const [base]=await prepareNestedMotion([corrupt.root],true);
+    if(mode!=='apply')await applyNestedMotion(corrupt.root.id,base,2,true);
+    const before=collectManualTracks(corrupt.child.manualKeyframeTracks),previous=corrupt.child.getPluginData(markerKey),setter=corrupt.child.setPluginData;
+    let pending=true;
+    corrupt.child.setPluginData=(k,v)=>{
+      if(k===markerKey&&pending){
+        pending=false;
+        const damaged=corruptKind==='missing-bank'?JSON.stringify({version:2,count:2}):
+          corruptKind==='wrong-bank'?JSON.stringify({version:2,bank:'wrong',count:1,length:1,checksum:0}):v?v.slice(0,-1):'{';
+        setter(k,damaged);
+        if(corruptKind==='corrupt-then-throw')throw new Error('pointer corrupted before throwing');
+        return;
+      }
+      setter(k,v);
+    };
+    await assert.rejects(mode==='clear'?restoreNestedMotion(corrupt.root):applyNestedMotion(corrupt.root.id,base,3,true),error=>
+      /did not preserve saved|pointer corrupted before throwing/.test(error.message)&&!/rollback failed/.test(error.message));
+    assert.equal(corrupt.child.getPluginData(markerKey),previous,'Exact known-good pointer restored');
+    assert.deepEqual(collectManualTracks(corrupt.child.manualKeyframeTracks),before);
+    const [after]=await prepareNestedMotion([corrupt.root],true);assert.deepEqual(after.layers[0].tracks,base.layers[0].tracks);
+    await applyNestedMotion(corrupt.root.id,after,4,true);await restoreNestedMotion(corrupt.root);assert.equal(corrupt.storage.size,0);
+  }
+  const damaged=makeLarge();const [d]=await prepareNestedMotion([damaged.root],true);
+  await applyNestedMotion(damaged.root.id,d,2,true);
+  const header=JSON.parse(damaged.child.getPluginData(markerKey)),partKey=`${markerKey}:${header.bank}:0`,part=damaged.storage.get(partKey);
+  damaged.storage.delete(partKey);
+  await assert.rejects(prepareNestedMotion([damaged.root],true),/Missing saved/);
+  damaged.storage.set(partKey,part.replace('version','versioX'));
+  await assert.rejects(prepareNestedMotion([damaged.root],true),/Damaged saved/);
+  console.log(`Nested chunk storage: ${Buffer.byteLength(raw)}-byte fixture; ${firstCalls} staged writes; ${injected} injected failures; restart, Unicode, rollback, Clear and corruption checks passed`);
+}

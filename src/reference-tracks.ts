@@ -28,11 +28,21 @@ export function compileReference(settings: MotionSettings,sources:readonly Sourc
   // Locate visibility/layer ownership discontinuities; never smear them across
   // a regular sampling interval. Tiny brackets are below a Motion frame.
   for(let i=0;i<samples;i++){
-    let lo=duration*i/samples,hi=duration*(i+1)/samples;
-    const before=signature(lo);
-    if(before===signature(hi))continue;
-    for(let j=0;j<36;j++){const mid=(lo+hi)/2;if(signature(mid)===before)lo=mid;else hi=mid;}
-    times.add(lo);times.add(hi);
+    let cursor=duration*i/samples;
+    const end=duration*(i+1)/samples;
+    // A population change and a layer swap can occur almost simultaneously
+    // (center-focused Rows do this). Locating only the first change freezes
+    // a still-visible service copy until an arbitrary refinement sample.
+    // Continue through the interval so every outgoing pose has its own bracket.
+    for(let changes=0;signature(cursor)!==signature(end);changes++){
+      if(changes>=maxNativeServiceCopies*2)throw new Error("Too many layer handoffs in one animation interval. Reduce the card count or cycle speed.");
+      let lo=cursor,hi=end;
+      const before=signature(lo);
+      for(let j=0;j<36;j++){const mid=(lo+hi)/2;if(signature(mid)===before)lo=mid;else hi=mid;}
+      times.add(lo);times.add(hi);
+      if(hi<=cursor)break;
+      cursor=hi;
+    }
   }
   const seeds=[...times].sort((a,b)=>a-b);
   const refine=(lo:number,hi:number,depth=0)=>{

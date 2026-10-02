@@ -38,7 +38,12 @@ export function collectManualTracks(tracks:ManualKeyframeTracks,onUnsupported?:(
         else if(path.length===2&&collection!=="effects")field={...indexed,collection:collection as "fills"|"strokes"};
         else throw new Error("Unsupported nested animation field.");
       }
-      result.push({field,input:trackContents(value as ManualKeyframeTrackInput)});
+      let input=trackContents(value as ManualKeyframeTrackInput);
+      if(field.type==="PROPERTY"&&["PATH_TRIM_START","PATH_TRIM_END"].includes(field.name)){
+        try{input=normalizeWrappingPathTrim(input);}
+        catch(error){onUnsupported?.(`${field.name} (${error instanceof Error?error.message:String(error)})`);return;}
+      }
+      result.push({field,input});
     }else for(const [key,item] of Object.entries(value))visit(item,[...path,key]);
   };
   visit(tracks,[]);
@@ -55,14 +60,100 @@ function descendants(root:SceneNode):Array<{node:SceneNode;path:number[]}> {
   visit(root,[]);
   return result;
 }
+// Keep each value comfortably below Figma's 100 kB entry limit in both UTF-8
+// and UTF-16. A pointer is committed only after the inactive bank is complete.
+const markerChunkSize=16*1024;
+interface ChunkMarker {version:2; bank:"a"|"b"; count:number; length:number; checksum:number}
+const chunkKey=(bank:string,index:number)=>`${markerKey}:${bank}:${index}`;
+function checksum(raw:string):number {
+  let hash=2166136261;
+  for(let index=0;index<raw.length;index++)hash=Math.imul(hash^raw.charCodeAt(index),16777619);
+  return hash>>>0;
+}
+function chunkHeader(raw:string):ChunkMarker|undefined {
+  if(!raw)return;
+  const value=JSON.parse(raw);
+  if(value.version!==2)return;
+  if(!["a","b"].includes(value.bank)||!Number.isSafeInteger(value.count)||value.count<1||
+    !Number.isSafeInteger(value.length)||value.length<1||value.count>Math.ceil(value.length/(markerChunkSize-1))||
+    !Number.isInteger(value.checksum))throw new Error("Invalid saved nested animation timing chunks.");
+  return value;
+}
+function readMarkerRaw(node:SceneNode):string {
+  const raw=node.getPluginData(markerKey),header=chunkHeader(raw);
+  if(!header)return raw;
+  const parts:string[]=[];
+  for(let index=0;index<header.count;index++){
+    const part=node.getPluginData(chunkKey(header.bank,index));
+    if(!part||part.length>markerChunkSize)throw new Error("Missing saved nested animation timing chunk.");
+    parts.push(part);
+  }
+  const result=parts.join("");
+  if(result.length!==header.length||checksum(result)!==header.checksum)throw new Error("Damaged saved nested animation timing chunks.");
+  return result;
+}
+async function writeMarker(fresh:()=>Promise<SceneNode>,raw:string):Promise<void> {
+  const node=await fresh();
+  if(readMarkerRaw(node)===raw)return;
+  const previous=node.getPluginData(markerKey),old=chunkHeader(previous);
+  const bank=old?.bank==="a"?"b":"a";
+  const staged:string[]=[];
+  const clear=async(keys:string[])=>{
+    // Cleanup is best effort after commit. Stale chunks are unreachable and a
+    // later successful write retries their removal; they never become baseline.
+    for(const key of keys)try{(await fresh()).setPluginData(key,"");}catch{}
+  };
+  try{
+    let pointer=raw;
+    if(raw.length>markerChunkSize){
+      for(let start=0;start<raw.length;){
+        let end=Math.min(raw.length,start+markerChunkSize);
+        // Never split an astral character at the UTF-16 boundary.
+        const last=raw.charCodeAt(end-1);
+        if(end<raw.length&&last>=0xd800&&last<=0xdbff)end--;
+        const key=chunkKey(bank,staged.length);staged.push(key);
+        const part=raw.slice(start,end);
+        (await fresh()).setPluginData(key,part);
+        if((await fresh()).getPluginData(key)!==part)throw new Error("Figma did not preserve saved nested animation timing chunk.");
+        start=end;
+      }
+      pointer=JSON.stringify({version:2,bank,count:staged.length,length:raw.length,checksum:checksum(raw)} satisfies ChunkMarker);
+    }
+    (await fresh()).setPluginData(markerKey,pointer);
+    if((await fresh()).getPluginData(markerKey)!==pointer)throw new Error("Figma did not preserve saved nested animation timing marker.");
+  }catch(error){
+    // Restore the exact known-good pointer, without parsing possibly truncated
+    // native readback. The previous bank is untouched until this transaction
+    // commits, so this also recovers a setter that writes corrupt data or throws
+    // after changing state. Unknown preexisting formats never reach this phase.
+    try{
+      if((await fresh()).getPluginData(markerKey)!==previous)
+        (await fresh()).setPluginData(markerKey,previous);
+      if((await fresh()).getPluginData(markerKey)!==previous)
+        throw new Error("Figma did not restore the saved nested animation timing marker.");
+    }catch(recoveryError){
+      // Retain both banks if restoring the pointer cannot be verified.
+      throw new Error(`${errorText(error)}; saved nested timing marker rollback failed: ${errorText(recoveryError)}`);
+    }
+    await clear(staged);
+    throw error;
+  }
+  const current=await fresh();
+  const allKeys=typeof current.getPluginDataKeys==="function"?current.getPluginDataKeys():
+    old?Array.from({length:old.count},(_,index)=>chunkKey(old.bank,index)):[];
+  await clear(allKeys.filter(key=>/^orbit-entry-motion:[ab]:\d+$/.test(key)&&!staged.includes(key)));
+}
 function readMarker(node:SceneNode):EntryMarker|undefined {
-  const raw=node.getPluginData(markerKey);
+  const raw=readMarkerRaw(node);
   if(!raw)return;
   const value=JSON.parse(raw) as EntryMarker;
   if(value.version!==1||!Array.isArray(value.tracks))throw new Error("Unsupported saved nested animation timing.");
   return value;
 }
 const fieldKey=(field:KeyframeField)=>JSON.stringify(field);
+const comparableTrack=(field:KeyframeField,input:ManualKeyframeTrackInput):ManualKeyframeTrackInput=>
+  field.type==="PROPERTY"&&["PATH_TRIM_START","PATH_TRIM_END"].includes(field.name)?
+    normalizeWrappingPathTrim(trackContents(input)):trackContents(input);
 
 /** Bake once before cloning. Read a stable baseline; never add offsets to a previous Apply. */
 export async function prepareNestedMotion(roots:readonly SceneNode[],enabled:boolean):Promise<NestedMotion[]> {
@@ -86,7 +177,7 @@ export async function prepareNestedMotion(roots:readonly SceneNode[],enabled:boo
       const tracks=collectManualTracks(node.manualKeyframeTracks,field=>{if(enabled)unsupported.push(`${node.name} (${node.id}): ${field||"unnamed field"}`);}).map(({field,input})=>{
         const saved=marker?.tracks.find(track=>fieldKey(track.field)===fieldKey(field));
         // Preserve edits made by the user after Apply, including newly added tracks.
-        const original=saved&&sameMotion(input,saved.applied)?copy(saved.original):input;
+        const original=saved&&sameMotion(input,trackContents(saved.applied))?copy(saved.original):input;
         for(const key of original.keyframes){
           if(!Number.isFinite(key.timelinePosition)||key.timelinePosition<0)throw new Error(`${node.name}: invalid nested animation timing.`);
           firstKey=Math.min(firstKey,key.timelinePosition);
@@ -148,6 +239,21 @@ export function nestedShift(snapshot:NestedMotion,entry:number,offset:number):nu
 type LayerState = {path:number[]; tracks:ReturnType<typeof collectManualTracks>; marker:string};
 const errorText=(error:unknown)=>error instanceof Error?error.message:String(error);
 
+/** Report the first native mismatch without relaxing the readback contract. */
+function motionMismatch(actual:unknown,expected:unknown,path="track"):string {
+  if(sameMotion(actual,expected))return "";
+  if(Array.isArray(actual)&&Array.isArray(expected)){
+    if(actual.length!==expected.length)return `${path}.length: expected ${expected.length}, got ${actual.length}`;
+    for(let i=0;i<expected.length;i++)if(!sameMotion(actual[i],expected[i]))return motionMismatch(actual[i],expected[i],`${path}[${i}]`);
+  }
+  if(actual&&expected&&typeof actual==="object"&&typeof expected==="object"){
+    const a=actual as Record<string,unknown>,e=expected as Record<string,unknown>;
+    for(const key of Object.keys(e))if(!(key in a)||!sameMotion(a[key],e[key]))return motionMismatch(a[key],e[key],`${path}.${key}`);
+    for(const key of Object.keys(a))if(!(key in e))return `${path}.${key}: unexpected ${JSON.stringify(a[key]).slice(0,200)}`;
+  }
+  return `${path}: expected ${String(JSON.stringify(expected)).slice(0,200)}, got ${String(JSON.stringify(actual)).slice(0,200)}`;
+}
+
 /** Re-resolve after every mutation: native Motion writes can invalidate node handles. */
 async function writeLayer(rootId:string,layer:LayerState,resolveRoot?:RootResolver):Promise<void> {
   let id=(await layerAt(rootId,layer.path,resolveRoot)).id;
@@ -159,12 +265,11 @@ async function writeLayer(rootId:string,layer:LayerState,resolveRoot?:RootResolv
   for(const {field,input} of layer.tracks){
     const node=await fresh();
     const current=manualAt(node,field);
-    if(current&&sameMotion(trackContents(current),input))continue;
+    if(current&&sameMotion(comparableTrack(field,current),trackContents(input)))continue;
     try{node.applyManualKeyframeTrack(field,input);}
     catch(error){throw new Error(`${node.name} (${node.id}), ${fieldKey(field)}: ${errorText(error)}`);}
   }
-  const node=await fresh();
-  if(node.getPluginData(markerKey)!==layer.marker)node.setPluginData(markerKey,layer.marker);
+  await writeMarker(fresh,layer.marker);
 }
 async function restoreLayers(rootId:string,layers:LayerState[],resolveRoot?:RootResolver):Promise<string[]> {
   const errors:string[]=[];
@@ -174,30 +279,33 @@ async function restoreLayers(rootId:string,layers:LayerState[],resolveRoot?:Root
   }
   return errors;
 }
-export interface NestedMotionJob {rootId:string; snapshot:NestedMotion; shift:number; enabled:boolean; rewindAt?:number; loopEnd?:number; occurrences?:MainOccurrence[]; offset?:number}
+export interface NestedMotionJob {rootId:string; snapshot:NestedMotion; shift:number; enabled:boolean; rewindAt?:number; loopEnd?:number; occurrences?:MainOccurrence[]; offset?:number; repeat?:boolean}
 /** One write phase and one native readback flush for the whole composition. */
 export async function applyNestedMotionBatch(jobs:readonly NestedMotionJob[]):Promise<void> {
   const previous:Array<{rootId:string;layer:LayerState}>=[];
   const expected:Array<{rootId:string;id:string;layer:LayerState}>=[];
   const roots=new Map<string,RootResolver>();
   try{
-    const requests=jobs.flatMap(({rootId,snapshot,shift,enabled,rewindAt,loopEnd,occurrences,offset})=>snapshot.layers.map(layer=>({rootId,shift,enabled,rewindAt,loopEnd,occurrences,offset,layer})));
+    const requests=jobs.flatMap(({rootId,snapshot,shift,enabled,rewindAt,loopEnd,occurrences,offset,repeat})=>{
+      const repeatDuration=repeat?snapshot.layers.reduce((duration,layer)=>layer.tracks.reduce((duration,{input})=>input.keyframes.reduce((duration,key)=>Math.max(duration,key.timelinePosition),duration),duration),0):undefined;
+      return snapshot.layers.map(layer=>({rootId,shift,enabled,rewindAt,loopEnd,occurrences,offset,repeatDuration,layer}));
+    });
     for(const rootId of new Set(requests.map(request=>request.rootId))){
       const root=await layerAt(rootId,[]);roots.set(rootId,rootResolver(root));
     }
     const resolved=await Promise.all(requests.map(({rootId,layer})=>layerAt(rootId,layer.path,roots.get(rootId))));
-    for(const [index,{rootId,shift,enabled,rewindAt,loopEnd,occurrences,offset,layer}] of requests.entries()){
+    for(const [index,{rootId,shift,enabled,rewindAt,loopEnd,occurrences,offset,repeatDuration,layer}] of requests.entries()){
       const node=resolved[index];
-      const before={path:layer.path,tracks:collectManualTracks(node.manualKeyframeTracks),marker:node.getPluginData(markerKey)};
+      const before={path:layer.path,tracks:collectManualTracks(node.manualKeyframeTracks),marker:readMarkerRaw(node)};
       const saved:SavedTrack[]=layer.tracks.map(({field,input})=>({field,original:input,
-        applied:enabled&&occurrences?.length&&loopEnd?periodicNestedTrack(input,occurrences,offset??0,loopEnd):retimeNestedTrack(input,enabled?shift:0,enabled?rewindAt:undefined,loopEnd),
+        applied:enabled&&occurrences?.length&&loopEnd?periodicNestedTrack(input,occurrences,offset??0,loopEnd,repeatDuration):enabled&&repeatDuration&&loopEnd?fittedNestedLoop(input,loopEnd,repeatDuration):retimeNestedTrack(input,enabled?shift:0,enabled?rewindAt:undefined,loopEnd),
       }));
       const after:LayerState={path:layer.path,tracks:saved.map(({field,applied})=>({field,input:applied})),
         marker:enabled?JSON.stringify({version:1,tracks:saved} satisfies EntryMarker):""};
       // Unchanged source baselines need neither writes nor a deferred readback.
       if(before.marker===after.marker&&after.tracks.every(({field,input})=>{
         const current=before.tracks.find(track=>fieldKey(track.field)===fieldKey(field));
-        return current&&sameMotion(current.input,input);
+        return current&&sameMotion(current.input,trackContents(input));
       }))continue;
       previous.push({rootId,layer:before});expected.push({rootId,id:node.id,layer:after});
     }
@@ -215,22 +323,18 @@ export async function applyNestedMotionBatch(jobs:readonly NestedMotionJob[]):Pr
       const nodes=await Promise.all(active.map(fresh));
       for(const [i,item] of active.entries()){
         const node=nodes[i],{field,input}=item.layer.tracks[index],current=manualAt(node,field);
-        if(current&&sameMotion(trackContents(current),input))continue;
+        if(current&&sameMotion(comparableTrack(field,current),trackContents(input)))continue;
         try{node.applyManualKeyframeTrack(field,input);}
         catch(error){throw new Error(`${node.name} (${node.id}), ${fieldKey(field)}: ${errorText(error)}`);}
       }
     }
-    const markerNodes=await Promise.all(expected.map(fresh));
-    for(const [index,item] of expected.entries()){
-      const node=markerNodes[index];
-      if(node.getPluginData(markerKey)!==item.layer.marker)node.setPluginData(markerKey,item.layer.marker);
-    }
+    for(const item of expected)await writeMarker(()=>fresh(item),item.layer.marker);
     await new Promise<void>(resolve=>setTimeout(resolve,0));
     for(const {rootId,layer} of expected){
       const node=await layerAt(rootId,layer.path,roots.get(rootId));
       for(const {field,input} of layer.tracks){
         const actual=manualAt(node,field);
-        if(!actual||!sameMotion(trackContents(actual),input))throw new Error(`${node.name} (${node.id}), ${fieldKey(field)}: Figma did not preserve nested animation timing.`);
+        if(!actual||!sameMotion(comparableTrack(field,actual),trackContents(input)))throw new Error(`${node.name} (${node.id}), ${fieldKey(field)}: Figma did not preserve nested animation timing. ${motionMismatch(actual?comparableTrack(field,actual):undefined,trackContents(input))}`);
       }
     }
   }catch(error){
@@ -252,7 +356,7 @@ export async function restoreNestedMotion(root:SceneNode):Promise<void> {
 /** Restore original child state if a native composition fails during commit. */
 export async function captureNestedState(roots:readonly SceneNode[]):Promise<()=>Promise<void>> {
   const states=roots.map(root=>({id:root.id,resolveRoot:rootResolver(root),layers:descendants(root).filter(({node})=>node.manualKeyframeTracks).map(({node,path})=>({
-    path,tracks:collectManualTracks(node.manualKeyframeTracks),marker:node.getPluginData(markerKey),
+    path,tracks:collectManualTracks(node.manualKeyframeTracks),marker:readMarkerRaw(node),
   }))}));
   return async()=>{
     const errors:string[]=[];
@@ -414,6 +518,41 @@ export function loopRewindTimes(instances:readonly {source:number;frames:readonl
 }
 
 export interface MainOccurrence {start:number; reset:number}
+/** Replay at every foreground pose; rewind on the rear pose, not the timeline seam. */
+export function mainPoseOccurrences(frames:readonly GeneratedKeyframe[],duration:number):MainOccurrence[] {
+  const samples=frames.filter(frame=>frame.time<duration-1e-7);
+  if(!samples.length)return [];
+  const visible=samples.filter(frame=>frame.opacity>.001);
+  if(!visible.length)return [];
+  const depths=visible.map(frame=>frame.z);
+  const hasDepth=Math.max(...depths)-Math.min(...depths)>1e-5;
+  const scores=samples.map(frame=>frame.opacity<=.001?-Infinity:
+    hasDepth?frame.z:-(frame.x*frame.x+frame.y*frame.y));
+  const count=samples.length;
+  const peaks:number[]=[];
+  for(let i=0;i<count;i++){
+    if(!Number.isFinite(scores[i]))continue;
+    const before=scores[(i+count-1)%count];
+    if(scores[i]<=before+1e-8)continue;
+    let next=(i+1)%count;
+    while(next!==i&&Math.abs(scores[next]-scores[i])<=1e-8)next=(next+1)%count;
+    if(scores[i]>scores[next]+1e-8)peaks.push(i);
+  }
+  if(!peaks.length)return [{start:mainPoseTime(frames,duration),reset:0}];
+  return peaks.map((peak,index)=>{
+    // Include the preceding lap when the rear pose falls after this peak in time.
+    const previous=peaks[(index+peaks.length-1)%peaks.length];
+    let rear=previous,best=Infinity;
+    for(let step=1;step<=count;step++){
+      const candidate=(previous+step)%count;
+      if(scores[candidate]<best){best=scores[candidate];rear=candidate;}
+      if(candidate===peak)break;
+    }
+    const start=samples[peak].time;
+    const reset=samples[rear].time-(rear>peak?duration:0);
+    return {start,reset};
+  });
+}
 /** Real ownership transitions, including the occurrence spanning the timeline seam. */
 export function mainCardOccurrences(instances:readonly {source:number;layer:number;frames:readonly GeneratedKeyframe[]}[],sourceCount:number,duration:number,mode:"front"|"center"="center"):MainOccurrence[][] {
   const events:Array<{source:number;time:number}>=[];
@@ -479,8 +618,14 @@ function nestedTrackWindow(input:ManualKeyframeTrackInput,from:number,to:number)
         const restrict=(v:number[])=>split(split(v,hi)[0],lo/hi)[1];
         const cx=restrict(x),cy=restrict(y),dy=cy[3]-cy[0];
         left=mix(a.value,b.value,cy[0]) as KeyframeValue;right=mix(a.value,b.value,cy[3]) as KeyframeValue;
-        if(Math.abs(dy)<1e-12)throw new Error("A nested easing turning point crosses the loop seam. Adjust its offset slightly.");
-        easing={type:"CUSTOM_CUBIC_BEZIER",easingFunctionCubicBezier:{x1:(cx[1]-p)/(q-p),x2:(cx[2]-p)/(q-p),y1:(cy[1]-cy[0])/dy,y2:(cy[2]-cy[0])/dy}};
+        if(Math.abs(dy)<1e-12){
+          // Clipping a flat easing tail or a floating-point sliver at the
+          // timeline boundary can collapse dy. Only flatten a segment whose
+          // entire Bezier control hull is numerically flat; equal endpoints
+          // alone can hide a real excursion and must still fail explicitly.
+          if(Math.max(...cy)-Math.min(...cy)>1e-12)throw new Error("A nested easing turning point crosses the loop seam. Adjust its offset slightly.");
+          easing={type:"LINEAR"};
+        }else easing={type:"CUSTOM_CUBIC_BEZIER",easingFunctionCubicBezier:{x1:(cx[1]-p)/(q-p),x2:(cx[2]-p)/(q-p),y1:(cy[1]-cy[0])/dy,y2:(cy[2]-cy[0])/dy}};
       }
     }
     if(!out.length||out[out.length-1].timelinePosition<start)out.push(hold(start,left));
@@ -491,8 +636,119 @@ function nestedTrackWindow(input:ManualKeyframeTrackInput,from:number,to:number)
   return {...copy(input),keyframes:out};
 }
 
+/** Figma plays trims modulo one, but its setters reject values outside 0..1.
+ * Split at whole-path crossings instead of clamping or tweening backwards.
+ * The two keys around a crossing are separated on the native microsecond grid.
+ */
+export function normalizeWrappingPathTrim(input:ManualKeyframeTrackInput):ManualKeyframeTrackInput {
+  const scalar=(value:KeyframeValue):number=>{
+    if(value.type!=="FLOAT"||!Number.isFinite(value.value))throw new Error("invalid path trim value");
+    return value.value;
+  };
+  const values=input.keyframes.map(key=>scalar(key.value));
+  const base=input.baseValue?scalar(input.baseValue):undefined;
+  if([...values,...(base===undefined?[]:[base])].every(value=>value>=0&&value<=1))return copy(input);
+  const wrap=(value:number)=>value>=0&&value<=1?value:((value%1)+1)%1;
+  const bounded=(value:number)=>({type:"FLOAT" as const,value:Math.max(0,Math.min(1,value))});
+  const out:ManualKeyframeInput[]=[];
+  const append=(key:ManualKeyframeInput)=>{
+    const previous=out.at(-1);
+    if(previous&&Math.abs(previous.timelinePosition-key.timelinePosition)<1e-12){
+      // Keep the incoming easing if the next interval continues the same pose.
+      if(Math.abs(scalar(previous.value)-scalar(key.value))<1e-10)return;
+      out[out.length-1]=key;
+    }else out.push(key);
+  };
+  if(input.keyframes.length===1)out.push({...copy(input.keyframes[0]),value:bounded(wrap(values[0]))});
+  const cubic=(t:number,a:number,b:number)=>3*(1-t)**2*t*a+3*(1-t)*t*t*b+t**3;
+  for(let i=1;i<input.keyframes.length;i++){
+    const a=input.keyframes[i-1],b=input.keyframes[i],v0=values[i-1],v1=values[i];
+    const span=b.timelinePosition-a.timelinePosition;
+    if(!Number.isFinite(span)||span<=0)throw new Error("invalid path trim timing");
+    if(b.easing?.type==="HOLD"||v0===v1){
+      append({...copy(a),value:bounded(wrap(v0)),easing:{type:"HOLD"}});
+      append({...copy(b),value:bounded(wrap(v1))});continue;
+    }
+    const ease=b.easing;
+    const curve=ease&&"easingFunctionCubicBezier" in ease?ease.easingFunctionCubicBezier:undefined;
+    if(ease&&ease.type!=="LINEAR"&&(!curve||("easingFunctionSpring" in ease&&ease.easingFunctionSpring)||
+      curve.y1<0||curve.y2>1||curve.y1>curve.y2))throw new Error("wrapping spring or non-monotonic easing cannot be converted exactly");
+    const crossing=(value:number)=>{
+      const progress=(value-v0)/(v1-v0);
+      if(!curve||ease?.type==="LINEAR")return a.timelinePosition+span*progress;
+      let lo=0,hi=1;
+      for(let step=0;step<50;step++){const mid=(lo+hi)/2;if(cubic(mid,curve.y1,curve.y2)<progress)lo=mid;else hi=mid;}
+      return a.timelinePosition+span*cubic((lo+hi)/2,curve.x1,curve.x2);
+    };
+    const cuts=[a.timelinePosition,b.timelinePosition];
+    const first=Math.floor(Math.min(v0,v1))+1,last=Math.ceil(Math.max(v0,v1))-1;
+    if(!Number.isSafeInteger(first)||!Number.isSafeInteger(last)||last-first>10000)throw new Error("too many path trim crossings");
+    for(let integer=first;integer<=last;integer++)cuts.push(crossing(integer));
+    cuts.sort((x,y)=>x-y);
+    for(let cut=0;cut<cuts.length-1;cut++){
+      const from=cuts[cut],boundary=cuts[cut+1];
+      // Also split a crossing on an authored key shared with the next segment.
+      const endpointInteger=Math.abs(v1-Math.round(v1))<1e-10;
+      const nextDirection=i+1<values.length?values[i+1]-v1:0;
+      const wrapsAtEnd=cut===cuts.length-2&&endpointInteger&&nextDirection*(v1-v0)>0;
+      const resets=cut<cuts.length-2||wrapsAtEnd;
+      const to=boundary-(resets?Math.min(1e-5,(boundary-from)/4):0);
+      if(resets&&boundary-to<2e-6)throw new Error("path trim crossings are too close on Figma's timeline");
+      // Evaluate the midpoint with the segment's original cubic easing.
+      const mid=nestedTrackWindow({keyframes:[a,b]},a.timelinePosition,(from+to)/2).keyframes.at(-1)!;
+      const turn=Math.floor(scalar(mid.value));
+      const fragment=nestedTrackWindow({keyframes:[a,b]},from,to);
+      fragment.keyframes.forEach((key,index)=>append({...key,value:bounded(scalar(key.value)-turn),
+        easing:index===0?{type:"HOLD"}:key.easing}));
+    }
+  }
+  return {...copy(input),...(base===undefined?{}:{baseValue:bounded(wrap(base))}),keyframes:out};
+}
+
+/** Repeat one shared card timeline; shorter tracks hold until its next cycle. */
+function repeatingNestedWindow(input:ManualKeyframeTrackInput,from:number,to:number,start:number,period:number):ManualKeyframeTrackInput {
+  if(!Number.isFinite(period)||period<=0)throw new Error("Invalid card animation duration.");
+  const keys:ManualKeyframeInput[]=[];
+  const hold=(time:number)=>({timelinePosition:time,value:copy(input.keyframes[0].value),easing:{type:"HOLD" as const}});
+  if(from<start){keys.push(hold(from));if(to<=start)return {...copy(input),keyframes:[...keys,hold(to)]};keys.push(hold(start));}
+  const first=Math.max(0,Math.floor((from-start)/period));
+  const last=Math.max(first,Math.ceil((to-start)/period)-1);
+  if((last-first+1)*(input.keyframes.length+2)>100000)throw new Error("Card animation is too short to loop within this cycle. Increase its duration.");
+  for(let cycle=first;cycle<=last;cycle++){
+    const time=start+cycle*period,end=time+period;
+    const left=Math.max(from,time),right=Math.min(to,end);
+    if(right<=left)continue;
+    const shifted={...input,keyframes:input.keyframes.map(key=>({...copy(key),timelinePosition:key.timelinePosition+time}))};
+    // Keep a discrete restart for authored reveals with different end states.
+    const epsilon=Math.min(1e-5,period/1000);
+    const segment=nestedTrackWindow(shifted,left,right===end&&right<to?right-epsilon:right);
+    keys.push(...segment.keyframes.map((key,index)=>index===0?{...key,easing:{type:"HOLD" as const}}:key));
+  }
+  return {...copy(input),keyframes:keys};
+}
+
+/** Independent card loops must complete whole laps inside the outer timeline.
+ * Otherwise e.g. a 1.2s animation in a 5s scene jumps from phase .2s to zero.
+ * Scale every track together; retain the authored baseline for Refresh/Clear.
+ * Foreground-triggered loops use their occurrence windows instead.
+ */
+export function fittedNestedLoop(input:ManualKeyframeTrackInput,duration:number,authoredPeriod:number):ManualKeyframeTrackInput {
+  if(!Number.isFinite(duration)||duration<=0||!Number.isFinite(authoredPeriod)||authoredPeriod<=0)
+    throw new Error("Invalid card animation duration.");
+  if(!input.keyframes.length)return copy(input);
+  const cycles=Math.max(1,Math.round(duration/authoredPeriod));
+  if(!Number.isSafeInteger(cycles))throw new Error("Card animation is too short to loop within this cycle. Increase its duration.");
+  const period=duration/cycles,scale=period/authoredPeriod;
+  const fitted={...copy(input),keyframes:input.keyframes.map(key=>({...copy(key),timelinePosition:key.timelinePosition*scale}))};
+  const first=fitted.keyframes[0];
+  // Include the restart at the exact global seam too, with a distinct
+  // preceding key for one-shot reveals whose first/last poses differ.
+  const before=repeatingNestedWindow(fitted,0,duration-Math.min(1e-5,period/1000),0,period);
+  return {...before,keyframes:[...before.keyframes,{timelinePosition:duration,value:copy(first.value),easing:{type:"HOLD"}}]};
+}
+
 /** Replay each foreground occurrence, including the tail that wraps across t=0. */
-export function periodicNestedTrack(input:ManualKeyframeTrackInput,occurrences:readonly MainOccurrence[],offset:number,duration:number):ManualKeyframeTrackInput {
+export function periodicNestedTrack(input:ManualKeyframeTrackInput,occurrences:readonly MainOccurrence[],offset:number,duration:number,repeatDuration?:number):ManualKeyframeTrackInput {
   if(!occurrences.length||!input.keyframes.length)return copy(input);
   if(!Number.isFinite(offset)||!Number.isFinite(duration)||duration<=0)
     throw new Error("Invalid nested loop timing.");
@@ -515,8 +771,30 @@ export function periodicNestedTrack(input:ManualKeyframeTrackInput,occurrences:r
     const episode=episodes[i],end=episodes[i+1].reset;
     if(end<=0||episode.reset>=duration||end<=episode.reset)continue;
     const shifted={...input,keyframes:input.keyframes.map(key=>({...copy(key),timelinePosition:key.timelinePosition+episode.start}))};
-    const segment=nestedTrackWindow(shifted,episode.reset,end-1e-5);
+    const segment=repeatDuration?repeatingNestedWindow(input,episode.reset,end-1e-5,episode.start,repeatDuration):nestedTrackWindow(shifted,episode.reset,end-1e-5);
     keys.push(...segment.keyframes.map((key,index)=>index===0?{...key,easing:{type:"HOLD" as const}}:key));
   }
-  return nestedTrackWindow({...input,keyframes:keys},0,duration);
+  const result=nestedTrackWindow({...input,keyframes:keys},0,duration);
+  // Floating-point cycle arithmetic can leave a zero-width fragment at t=0
+  // or loopEnd. Native Motion merges those keys at microsecond precision.
+  // Remove only numerically identical states, retaining the easing into the
+  // earlier key so the preceding authored curve never becomes a HOLD/tween.
+  const valueMagnitude=(v:unknown):number=>typeof v==="number"?Math.abs(v):v&&typeof v==="object"?Math.max(0,...Object.values(v).map(valueMagnitude)):0;
+  const valueTolerance=1e-12*Math.max(1,valueMagnitude(input.baseValue),...input.keyframes.map(key=>valueMagnitude(key.value)));
+  const sameValue=(a:unknown,b:unknown):boolean=>{
+    if(typeof a==="number"&&typeof b==="number")return Number.isFinite(a)&&Number.isFinite(b)&&Math.abs(a-b)<=valueTolerance;
+    if(a&&b&&typeof a==="object"&&typeof b==="object"){
+      const left=a as Record<string,unknown>,right=b as Record<string,unknown>;
+      return Object.keys(left).length===Object.keys(right).length&&Object.keys(left).every(k=>k in right&&sameValue(left[k],right[k]));
+    }
+    return a===b;
+  };
+  const distinct:ManualKeyframeInput[]=[];
+  for(const key of result.keyframes){
+    const previous=distinct[distinct.length-1];
+    if(previous&&key.timelinePosition-previous.timelinePosition<=1e-12&&sameValue(previous.value,key.value)){
+      distinct[distinct.length-1]={...key,easing:previous.easing?copy(previous.easing):undefined};
+    }else distinct.push(key);
+  }
+  return {...result,keyframes:distinct};
 }
