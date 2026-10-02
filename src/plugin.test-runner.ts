@@ -208,6 +208,7 @@ source.effects = [userBlur];
 parent.children = [source];
 let onMessage: ((message: unknown) => Promise<void>) | undefined;
 const postedMessages: any[] = [];
+const figmaEventHandlers = new Map<string, () => void>();
 globalThis.__html__ = "";
 globalThis.figma = {
   showUI() {},
@@ -227,7 +228,7 @@ globalThis.figma = {
   viewport: { scrollAndZoomIntoView() { viewportNavigationCalls += 1; } },
   motion: { physicalSpringToNormalized: () => 0.25 },
   getNodeByIdAsync: async (id: string) => {invalidatedSourceIds.delete(id);return nodeAliases.get(id)??nodes.get(id) ?? null;},
-  on() {},
+  on(event: string, handler: () => void) { figmaEventHandlers.set(event, handler); },
 };
 
 await import("./code");
@@ -1195,7 +1196,7 @@ for(const preset of [...referencePresets,{...referencePresets.find(p=>p.id==="re
   assert(cards.every(card=>card.visible&&card.opacity===1&&!card.getPluginData("orbit-motion")),"Clearing one linked source restores every original");
 }
 console.log(`Native reference export: all ${referencePresets.length} presets, sampled tracks, refresh and linked Clear passed`);
-for(const id of ["circle","orbit-3d-tilted","orbit-3d-helix","orbit-3d-eight"]){
+for(const id of ["circle","orbit-3d-tilted","orbit-3d-compact","orbit-3d-eight"]){
   const card=makeNode("Unified "+id);
   parent.insertChild(parent.children.length,card);
   globalThis.figma.currentPage.selection=[card];
@@ -1574,6 +1575,15 @@ async function regressionClear(cards:any[],authored:any,label:string):Promise<vo
 await (await import("./carousel-native.test-cases")).runCarouselNativeRegressions({
   makeNode,parent,topFrame,onMessage,nodes,postedMessages,sampleTrack,cloneData,
   setNativePrecision:(enabled:boolean)=>{nativeTimelinePrecision=enabled;},
+});
+
+await (await import("./section-target.test-cases")).runSectionTargetTests({
+  onMessage,postedMessages,makeNode,parent,topFrame,nodes,
+});
+
+await (await import("./trajectory-refresh.test-cases")).runTrajectoryRefreshTests({
+  onMessage,postedMessages,makeNode,parent,topFrame,nodes,cloneData,sampleTrack,
+  selectionChange:()=>figmaEventHandlers.get("selectionchange")?.(),
 });
 
 // Busy/error completion integration cases (separate from scene regression coverage).

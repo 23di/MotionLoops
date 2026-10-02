@@ -30,6 +30,8 @@ import {
   type UiToPluginMessage,
 } from "./types";
 
+import { LanguageProvider, useTranslation, useMessageTranslation } from "./language";
+
 const panelId = "orbit-motion-controls-v8";
 const legacyPanelId = "orbit-motion-controls-v7";
 
@@ -171,6 +173,7 @@ function writeSavedEasings(presets: SavedEasingPreset[]): void {
 }
 
 function EasingPresetManager({ transition }: { transition: DialTransition }) {
+  const t = useTranslation();
   const [saved, setSaved] = useState(readSavedEasings);
   const [open, setOpen] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -233,11 +236,11 @@ function EasingPresetManager({ transition }: { transition: DialTransition }) {
 
   return (
     <div className="dialkit-panel-toolbar orbit-easing-toolbar">
-      <button className="dialkit-toolbar-add" type="button" onClick={savePreset} title="Add easing preset" aria-label="Add easing preset">
+      <button className="dialkit-toolbar-add" type="button" onClick={savePreset} title={t("Add easing preset")} aria-label={t("Add easing preset")}>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M12 5v14M5 12h14" /></svg>
       </button>
       <div className="dialkit-preset-manager">
-        <button ref={triggerRef} className="dialkit-preset-trigger" type="button" onClick={toggleOpen} data-open={String(open)} aria-haspopup="menu" aria-expanded={open} aria-label="Easing presets">
+        <button ref={triggerRef} className="dialkit-preset-trigger" type="button" onClick={toggleOpen} data-open={String(open)} aria-haspopup="menu" aria-expanded={open} aria-label={t("Easing presets")}>
           <span className="dialkit-preset-label">{matching?.name ?? "Custom"}</span>
           <svg className="dialkit-select-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="m7 9 5 5 5-5" /></svg>
         </button>
@@ -249,7 +252,7 @@ function EasingPresetManager({ transition }: { transition: DialTransition }) {
                 <div className="dialkit-preset-item" data-active={String(preset.id === selectedId)} key={preset.id} onClick={() => applyPreset(preset.id)}>
                   <button className="dialkit-preset-name" type="button">{preset.name}</button>
                   {deletable && (
-                    <button className="dialkit-preset-delete" type="button" title={`Delete ${preset.name}`} onClick={(event) => { event.stopPropagation(); deletePreset(preset.id); }}>
+                    <button className="dialkit-preset-delete" type="button" title={t("Delete {name}", {name: preset.name})} onClick={(event) => { event.stopPropagation(); deletePreset(preset.id); }}>
                       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6M10 10v6M14 10v6" /></svg>
                     </button>
                   )}
@@ -278,6 +281,7 @@ function parsePathPoints(value: string): Array<[number, number]> {
 }
 
 function GeometryPathEditor({ settings, target }: { settings: MotionSettings; target: TargetPreview }) {
+  const t = useTranslation();
   const [points, setPoints] = useState<Array<[number, number]>>(
     () => parsePathPoints(settings.geometry.customPath),
   );
@@ -468,7 +472,7 @@ function GeometryPathEditor({ settings, target }: { settings: MotionSettings; ta
 
   return (
     <div className="orbit-path-controls">
-    <svg ref={editorRef} className={`orbit-path-editor ${renderOrbitPreview ? "orbit-path-editor-preview" : ""}`} style={{ width: `${viewWidth}px` }} viewBox={`0 0 ${viewWidth} ${viewHeight}`} role="img" aria-label={stackPreview ? "Stack shape preview" : renderOrbitPreview ? `${settings.geometry.shape} trajectory preview` : settings.geometry.shape === "custom-path" ? pathIsClosed ? "Edit a closed motion path" : "Draw an open motion path" : settings.geometry.dynamicScale ? "Ellipse fitted automatically to the selected frame" : "Adjust ellipse width and height"} onPointerDown={start} onPointerMove={move} onPointerUp={finish} onPointerCancel={finish}>
+    <svg ref={editorRef} className={`orbit-path-editor ${renderOrbitPreview ? "orbit-path-editor-preview" : ""}`} style={{ width: `${viewWidth}px` }} viewBox={`0 0 ${viewWidth} ${viewHeight}`} role="img" aria-label={stackPreview ? t("Stack shape preview") : renderOrbitPreview ? t("Trajectory preview") : settings.geometry.shape === "custom-path" ? pathIsClosed ? t("Edit a closed motion path") : t("Draw an open motion path") : settings.geometry.dynamicScale ? t("Ellipse fitted automatically to the selected frame") : t("Adjust ellipse width and height")} onPointerDown={start} onPointerMove={move} onPointerUp={finish} onPointerCancel={finish}>
       <rect width={viewWidth} height={viewHeight} rx="10" />
       <path className="orbit-path-grid" d={`M${centerX} 0V${viewHeight}M0 ${centerY}H${viewWidth}`} />
       {renderOrbitPreview ? orbitPreviewPaths.map((previewPath, index) => (
@@ -484,23 +488,23 @@ function GeometryPathEditor({ settings, target }: { settings: MotionSettings; ta
         <g className="orbit-orientation-handles">
           {!settings.geometry.dynamicScale && (
             <g transform={`rotate(${circleRotation} ${centerX} ${centerY})`}>
-              <circle className="orbit-path-handle" cx={centerX + radiusX * handleCameraScale} cy={centerY} r="6" aria-label="Adjust orbit width" onPointerDown={(event) => startHandle(event, "x")} />
-              <circle className="orbit-path-handle" cx={centerX} cy={centerY + projectedRadiusY * handleCameraScale} r="6" aria-label="Adjust orbit height" onPointerDown={(event) => startHandle(event, "y")} />
+              <circle className="orbit-path-handle" cx={centerX + radiusX * handleCameraScale} cy={centerY} r="6" aria-label={t("Adjust orbit width")} onPointerDown={(event) => startHandle(event, "x")} />
+              <circle className="orbit-path-handle" cx={centerX} cy={centerY + projectedRadiusY * handleCameraScale} r="6" aria-label={t("Adjust orbit height")} onPointerDown={(event) => startHandle(event, "y")} />
             </g>
           )}
           <line className="orbit-handle-guide" x1={rotationAnchor.x} y1={rotationAnchor.y} x2={rotationHandle.x} y2={rotationHandle.y} />
-          <circle className="orbit-path-handle orbit-rotation-handle" cx={rotationHandle.x} cy={rotationHandle.y} r="6" aria-label="Rotate orbit" onPointerDown={(event) => startHandle(event, "rotation")} />
+          <circle className="orbit-path-handle orbit-rotation-handle" cx={rotationHandle.x} cy={rotationHandle.y} r="6" aria-label={t("Rotate orbit")} onPointerDown={(event) => startHandle(event, "rotation")} />
           <line className="orbit-handle-guide" x1={tiltGuideX} y1={centerY - tiltTravel} x2={tiltGuideX} y2={centerY + tiltTravel} />
-          <circle className="orbit-path-handle orbit-tilt-handle" cx={tiltGuideX} cy={tiltHandleY} r="6" aria-label="Tilt orbit" onPointerDown={(event) => startHandle(event, "tilt")} />
+          <circle className="orbit-path-handle orbit-tilt-handle" cx={tiltGuideX} cy={tiltHandleY} r="6" aria-label={t("Tilt orbit")} onPointerDown={(event) => startHandle(event, "tilt")} />
         </g>
       )}
       {lineHandles && (
         <g className="orbit-orientation-handles">
           {!settings.geometry.dynamicScale && <g transform={`rotate(${circleRotation} ${centerX} ${centerY})`}>
-            <circle className="orbit-path-handle" cx={centerX + radiusX * handleCameraScale} cy={centerY} r="6" aria-label="Adjust line length" onPointerDown={(event) => startHandle(event, "x")} />
+            <circle className="orbit-path-handle" cx={centerX + radiusX * handleCameraScale} cy={centerY} r="6" aria-label={t("Adjust line length")} onPointerDown={(event) => startHandle(event, "x")} />
           </g>}
           <line className="orbit-handle-guide" x1={rotationAnchor.x} y1={rotationAnchor.y} x2={rotationHandle.x} y2={rotationHandle.y} />
-          <circle className="orbit-path-handle orbit-rotation-handle" cx={rotationHandle.x} cy={rotationHandle.y} r="6" aria-label="Rotate line" onPointerDown={(event) => startHandle(event, "rotation")} />
+          <circle className="orbit-path-handle orbit-rotation-handle" cx={rotationHandle.x} cy={rotationHandle.y} r="6" aria-label={t("Rotate line")} onPointerDown={(event) => startHandle(event, "rotation")} />
         </g>
       )}
     </svg>
@@ -568,6 +572,7 @@ function OrbitPreview({
   target: TargetPreview;
   onBack: () => void;
 }) {
+  const t = useTranslation();
   const previewRef = useRef<HTMLDivElement>(null);
   const [previewSize, setPreviewSize] = useState({ width: 328, height: 180 });
   const [pinned, setPinned] = useState(() => {
@@ -669,7 +674,7 @@ function OrbitPreview({
     <div
       ref={previewRef}
       className={`preview ${pinned ? "pinned" : ""}`}
-      aria-label="Live animation preview"
+      aria-label={t("Live animation preview")}
     >
       <div className="preview-grid" />
       <div className="preview-origin" />
@@ -702,8 +707,8 @@ function OrbitPreview({
       <button
         className="preview-back"
         type="button"
-        aria-label="Choose preset"
-        title="Presets"
+        aria-label={t("Choose preset")}
+        title={t("Presets")}
         onClick={onBack}
       >
         <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
@@ -713,9 +718,9 @@ function OrbitPreview({
       <button
         className="dialkit-root dialkit-toolbar-add preview-pin"
         type="button"
-        aria-label={pinned ? "Unpin preview" : "Pin preview"}
+        aria-label={pinned ? t("Unpin preview") : t("Pin preview")}
         aria-pressed={pinned}
-        title={pinned ? "Unpin preview" : "Pin preview while scrolling"}
+        title={pinned ? t("Unpin preview") : t("Pin preview while scrolling")}
         onClick={togglePinned}
       >
         <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
@@ -823,8 +828,13 @@ function PresetGallery({
   onDelete: (id: string) => void;
   theme: "light" | "dark";
 }) {
+  const t = useTranslation();
   const time = usePreviewTime(3600);
   const fingerprint = motionFingerprint(settings);
+  const presetName = (name: string) => {
+    const generated = name.match(/^(.*) · (\d+)$/);
+    return generated ? `${t(generated[1])} · ${generated[2]}` : name;
+  };
   const currentSaved = saved.find((item) => motionFingerprint(item.settings) === fingerprint);
   const showCurrent = Boolean(currentSaved) || fingerprint !== motionFingerprint(freshPreset(settings.preset, settings));
   const galleryPresets = useMemo(() => (
@@ -842,15 +852,15 @@ function PresetGallery({
 
   return (
     <main className="gallery-page">
-      <section className="preset-gallery" aria-label="Animation presets">
+      <section className="preset-gallery" aria-label={t("Animation presets")}>
         {showCurrent && <div className="preset-gallery-item saved-preset-row dialkit-root" data-theme={theme}>
-          <button className="saved-preset-preview" type="button" title={currentSaved ? `Current · ${currentSaved.name}` : "Current"} onClick={onCurrent}><PresetThumbnail settings={settings} target={target} time={time} /><span>Current</span></button>
-          <button className="dialkit-toolbar-add saved-preset-save" type="button" aria-label="Save current preset" title={currentSaved ? "Already saved" : "Save current preset"} disabled={Boolean(currentSaved)} onClick={onSave}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7"><path d="M5 3h12l4 4v14H3V3h2Zm2 0v6h10V3M7 21v-8h10v8" /></svg></button>
-          {currentSaved && <button className="dialkit-toolbar-add" type="button" aria-label={`Delete ${currentSaved.name}`} title="Delete saved preset" onClick={() => onDelete(currentSaved.id)}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7"><path d="M4 7h16M9 7V4h6v3M6 7l1 14h10l1-14M10 10v8m4-8v8" /></svg></button>}
+          <button className="saved-preset-preview" type="button" title={currentSaved ? `${t("Current")} · ${presetName(currentSaved.name)}` : t("Current")} onClick={onCurrent}><PresetThumbnail settings={settings} target={target} time={time} /><span>{t("Current")}</span></button>
+          <button className="dialkit-toolbar-add saved-preset-save" type="button" aria-label={t("Save current preset")} title={currentSaved ? t("Already saved") : t("Save current preset")} disabled={Boolean(currentSaved)} onClick={onSave}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7"><path d="M5 3h12l4 4v14H3V3h2Zm2 0v6h10V3M7 21v-8h10v8" /></svg></button>
+          {currentSaved && <button className="dialkit-toolbar-add" type="button" aria-label={t("Delete {name}", {name: presetName(currentSaved.name)})} title={t("Delete saved preset")} onClick={() => onDelete(currentSaved.id)}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7"><path d="M4 7h16M9 7V4h6v3M6 7l1 14h10l1-14M10 10v8m4-8v8" /></svg></button>}
         </div>}
         {saved.filter((item) => item.id !== currentSaved?.id).map((item) => <div className="preset-gallery-item saved-preset-row dialkit-root" data-theme={theme} key={item.id}>
-          <button className="saved-preset-preview" type="button" onClick={() => onLoad(item.id)}><PresetThumbnail settings={item.settings} target={target} time={time} /><span>{item.name}</span></button>
-          <button className="dialkit-toolbar-add" type="button" aria-label={`Delete ${item.name}`} title="Delete saved preset" onClick={() => onDelete(item.id)}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7"><path d="M4 7h16M9 7V4h6v3M6 7l1 14h10l1-14" /></svg></button>
+          <button className="saved-preset-preview" type="button" onClick={() => onLoad(item.id)}><PresetThumbnail settings={item.settings} target={target} time={time} /><span>{presetName(item.name)}</span></button>
+          <button className="dialkit-toolbar-add" type="button" aria-label={t("Delete {name}", {name: presetName(item.name)})} title={t("Delete saved preset")} onClick={() => onDelete(item.id)}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7"><path d="M4 7h16M9 7V4h6v3M6 7l1 14h10l1-14" /></svg></button>
         </div>)}
         {galleryPresets.map((preset, index) => {
           return (
@@ -858,12 +868,12 @@ function PresetGallery({
               className="preset-gallery-item preset-gallery-card"
               type="button"
               key={preset.value}
-              title={preset.description}
+              title={t(preset.description)}
               onClick={() => onSelect(preset.value)}
               style={{ "--gallery-index": index } as React.CSSProperties}
             >
               <PresetThumbnail settings={preset.settings} target={target} time={time} />
-              <span className="preset-gallery-name">{preset.label}</span>
+              <span className="preset-gallery-name">{t(preset.label)}</span>
               <svg className="preset-gallery-arrow" viewBox="0 0 24 24" fill="none" aria-hidden="true">
                 <path d="m9 18 6-6-6-6" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
               </svg>
@@ -901,6 +911,7 @@ function saveWindowHeight(height: number): void {
 }
 
 function ResizeHandle() {
+  const t = useTranslation();
   const [dragging, setDragging] = useState(false);
   const [height, setHeight] = useState(() => window.innerHeight);
   const dragStart = useRef({ screenY: 0, height: window.innerHeight });
@@ -958,13 +969,13 @@ function ResizeHandle() {
     <div
       className={`resize-handle ${dragging ? "dragging" : ""}`}
       role="separator"
-      aria-label="Resize plugin height"
+      aria-label={t("Resize plugin height")}
       aria-orientation="horizontal"
       aria-valuemin={minWindowHeight}
       aria-valuemax={maxWindowHeight}
       aria-valuenow={height}
       tabIndex={0}
-      title="Drag to resize · Arrow keys change height"
+      title={t("Drag to resize · Arrow keys change height")}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={stopDragging}
@@ -1064,6 +1075,8 @@ function OverlayScrollbar() {
 }
 
 function App() {
+  const t = useTranslation();
+  const translateStatus = useMessageTranslation();
   const theme = useFigmaTheme();
   const [page, setPage] = useState<"gallery" | "editor">("gallery");
   const initialSelectionHandled = useRef(false);
@@ -1112,11 +1125,13 @@ function App() {
     const storedPresets = DialStore.getPresets(panelId);
     const storedActiveId = DialStore.getActivePresetId(panelId);
     const activePresetName = storedPresets.find((preset) => preset.id === storedActiveId)?.name;
+    const removedCurrentPreset = DialStore.getValues(panelId).preset === "orbit-3d-helix";
     const builtInNames = new Set(presetOptions.map((preset) => preset.label));
     const migrateBuiltIns = shouldMigrateBuiltInPresets();
     const obsoletePresets = storedPresets.filter((preset) => (
       preset.name === "Album Wall" || preset.name === "Tunnel" ||
       preset.name === "Ripple" || preset.name === "Tile Wave" ||
+      preset.name === "3D · Double helix" ||
       (migrateBuiltIns && builtInNames.has(preset.name as typeof presetOptions[number]["label"]))
     ));
     const removedActivePreset = obsoletePresets.some(
@@ -1149,7 +1164,7 @@ function App() {
       : undefined;
     if (migratedActivePresetId) {
       DialStore.loadPreset(panelId, migratedActivePresetId);
-    } else if ((existingPresets.length === 0 || removedActivePreset) && defaultPresetId) {
+    } else if ((existingPresets.length === 0 || removedActivePreset || removedCurrentPreset) && defaultPresetId) {
       DialStore.loadPreset(panelId, defaultPresetId);
     } else if (
       previousActiveId &&
@@ -1353,21 +1368,21 @@ function App() {
       />
 
       {status && <div className={`status ${status.kind}`}>
-        <div>{status.message}</div>
+        <div>{translateStatus(status.message)}</div>
         {status.kind === "error" && status.diagnostics && (
           <button className="diagnostics-copy" type="button" onClick={() => void copyDiagnostics()}>
-            {diagnosticsCopied ? "Diagnostics copied" : "Copy diagnostics"}
+            {diagnosticsCopied ? t("Diagnostics copied") : t("Copy diagnostics")}
           </button>
         )}
       </div>}
 
-      {pasteDraft!==null&&<section className="paste-settings dialkit-root" data-theme={theme} aria-label="Import settings">
-        <label htmlFor="paste-settings-json">Paste settings JSON (⌘V / Ctrl+V)</label>
+      {pasteDraft!==null&&<section className="paste-settings dialkit-root" data-theme={theme} aria-label={t("Import settings")}>
+        <label htmlFor="paste-settings-json">{t("Paste settings JSON (⌘V / Ctrl+V)")}</label>
         <textarea id="paste-settings-json" autoFocus value={pasteDraft} onChange={event=>setPasteDraft(event.target.value)}
           onKeyDown={event=>{if(event.key==="Escape")setPasteDraft(null);}} spellCheck={false}/>
         <div className="other-clipboard-row">
-          <button className="dialkit-button" onClick={()=>setPasteDraft(null)}>Cancel</button>
-          <button className="dialkit-button" disabled={!pasteDraft.trim()} onClick={()=>importSettingsJson(pasteDraft)}>Import JSON</button>
+          <button className="dialkit-button" onClick={()=>setPasteDraft(null)}>{t("Cancel")}</button>
+          <button className="dialkit-button" disabled={!pasteDraft.trim()} onClick={()=>importSettingsJson(pasteDraft)}>{t("Import JSON")}</button>
         </div>
       </section>}
 
@@ -1375,7 +1390,7 @@ function App() {
         theme={theme} panelId={panelId} itemCount={activeTarget.count}
         diagnosticsAction={<button className="dialkit-button diagnostics-action" type="button" disabled={!lastDiagnostics || operation !== null}
           onClick={() => void copyDiagnostics(lastDiagnostics ?? undefined)}>
-          {diagnosticsCopied ? "Diagnostics copied" : "Copy diagnostics"}
+          {diagnosticsCopied ? t("Diagnostics copied") : t("Copy diagnostics")}
         </button>}
         shapeEditor={<GeometryPathEditor settings={effectiveValues} target={selection.targets[effectiveValues.other.scope]} />} />
 
@@ -1387,8 +1402,8 @@ function App() {
           onClick={clearMotion}
         >
           {operation === "clear" ? (
-            <span className="orbit-button-progress"><span className="orbit-spinner" />Clearing…</span>
-          ) : "Clear"}
+            <span className="orbit-button-progress"><span className="orbit-spinner" />{t("Clearing…")}</span>
+          ) : t("Clear")}
         </button>
         <button
           className="dialkit-button"
@@ -1397,8 +1412,8 @@ function App() {
           onClick={applyMotion}
         >
           {operation === "apply" ? (
-            <span className="orbit-button-progress"><span className="orbit-spinner" />Updating…</span>
-          ) : hasOrbitMotion ? "Refresh motion" : "Apply motion"}
+            <span className="orbit-button-progress"><span className="orbit-spinner" />{t("Updating…")}</span>
+          ) : hasOrbitMotion ? t("Refresh motion") : t("Apply motion")}
         </button>
       </div>
 
@@ -1410,6 +1425,6 @@ function App() {
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
-    <App />
+    <LanguageProvider><App /></LanguageProvider>
   </StrictMode>,
 );

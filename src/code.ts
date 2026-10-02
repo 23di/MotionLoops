@@ -10,6 +10,7 @@ import { fromMotionDocument, toMotionDocument, validateMotionDocument } from "./
 import { compileReference } from "./reference-tracks";
 import { editableVisibleMax } from "./motion-capabilities";
 import { recipeKey, recipePresentation } from "./preset-presentation";
+import { sameMotion, trackContents } from "./preset-conversion";
 import { prepareNestedMotion, applyNestedMotionBatch, type NestedMotionJob, restoreNestedMotion, nestedShift,
   captureNestedState, nestedMotionNotice, mainCardStarts, mainPoseTime, loopRewindTimes, mainCardOccurrences, mainPoseOccurrences } from "./nested-motion";
 import type {
@@ -128,8 +129,8 @@ function technicalNodeState(node: SceneNode): DiagnosticDetails {
     absoluteTransform: node.absoluteTransform,
     opacity: "opacity" in node ? node.opacity : null,
     translationTracks: isMotionNode(node) ? {
-      x: node.manualKeyframeTracks.TRANSLATION_X ?? null,
-      y: node.manualKeyframeTracks.TRANSLATION_Y ?? null,
+      x: diagnosticTrack(node.manualKeyframeTracks.TRANSLATION_X),
+      y: diagnosticTrack(node.manualKeyframeTracks.TRANSLATION_Y),
     } : null,
     parentId: parent?.id ?? null,
     presentInParent: hasSceneChildren(parent)
@@ -153,13 +154,33 @@ function technicalNodeState(node: SceneNode): DiagnosticDetails {
   };
 }
 
+function diagnosticTrack(track: ManualKeyframeTrackInput | undefined): DiagnosticDetails | null {
+  if (!track) return null;
+  const values = track.keyframes.flatMap(key => key.value.type === "FLOAT" ? [key.value.value] : []);
+  return {
+    baseValue: track.baseValue,
+    keyframeCount: track.keyframes.length,
+    firstKeyframe: track.keyframes[0] ?? null,
+    lastKeyframe: track.keyframes[track.keyframes.length - 1] ?? null,
+    range: values.length ? [Math.min(...values), Math.max(...values)] : null,
+  };
+}
+
 function buildDiagnosticReport(error: unknown): string {
   let selected: DiagnosticDetails[] = [];
   let marked: DiagnosticDetails[] = [];
   let markedTotal = 0;
   try {
     selected = figma.currentPage.selection.map(technicalNodeState);
-    const markedNodes = findMarkedPageNodes();
+    const targetIds = new Set(diagnosticTargetIds);
+    // A completion report should describe this operation, not serialize all
+    // animations in unrelated frames on a large design page.
+    const markedNodes = findMarkedPageNodes().filter(node => {
+      if (!targetIds.size) return false;
+      const marker = readOrbitMarker(node);
+      return targetIds.has(node.id) || Boolean(marker?.sourceId && targetIds.has(marker.sourceId)) ||
+        Boolean(marker?.referenceSourceIds?.some(id => targetIds.has(id)));
+    });
     markedTotal = markedNodes.length;
     marked = markedNodes.slice(0, 120).map(technicalNodeState);
   } catch (snapshotError) {
@@ -184,10 +205,15 @@ function buildDiagnosticReport(error: unknown): string {
 
 function selectionSummary(): SelectionSummary {
   const selection = figma.currentPage.selection;
+  const scopedTargets = {
+    selection: resolveTargets("selection"),
+    children: resolveTargets("children"),
+    deep: resolveTargets("deep"),
+  };
   const animatedTarget = ([
-    ...resolveTargets("selection"),
-    ...resolveTargets("children"),
-    ...resolveTargets("deep"),
+    ...scopedTargets.selection,
+    ...scopedTargets.children,
+    ...scopedTargets.deep,
   ]).find((node) => readOrbitMarker(node)?.role === "front");
   const animatedMarker = animatedTarget ? readOrbitMarker(animatedTarget) : null;
   const preset = animatedMarker?.preset;
@@ -195,7 +221,7 @@ function selectionSummary(): SelectionSummary {
     ? preset as PresetId
     : null;
   const targetPreview = (scope: TargetScope) => {
-    const targets = resolveTargets(scope);
+    const targets = scopedTargets[scope];
     const frameBounds = targets[0]?.getTopLevelFrame()?.absoluteBoundingBox;
     return {
       count: targets.length,
@@ -228,6 +254,9 @@ function selectionSummary(): SelectionSummary {
 }
 
 function sendSelection(): void {
+  // Motion writes can emit selection changes while the scene is incomplete.
+  // Apply/Clear send one settled selection after their completion result.
+  if (operationInProgress && !operationResultPosted) return;
   post({ type: "selection", selection: selectionSummary() });
 }
 
@@ -359,7 +388,11 @@ function isMotionNode(node: SceneNode): node is MotionNode {
 }
 
 function isTimelineOwner(node: SceneNode): boolean {
-  return node.type === "FRAME" && tryGetParent(node)?.type === "PAGE";
+  if (node.type !== "FRAME") return false;
+  // Sections organize the page without making their frames into motion cards.
+  let parent = tryGetParent(node);
+  while (parent?.type === "SECTION") parent = tryGetParent(parent);
+  return parent?.type === "PAGE";
 }
 
 function collectDescendants(node: SceneNode, deep: boolean, includeLocked: boolean): SceneNode[] {
@@ -862,7 +895,8 @@ async function captureDiagnosticAfter(): Promise<void> {
 }
 
 function findMarkedPageNodes(): SceneNode[] {
-  return figma.currentPage.findAll((node) => node.getPluginData(orbitMarkerKey) !== "");
+  return [...new Map(figma.currentPage.findAll((node) => node.getPluginData(orbitMarkerKey) !== "")
+    .map(node => [node.id, node])).values()];
 }
 
 async function findBackCopies(
@@ -1199,19 +1233,39 @@ function applyTracks(
   opacity: (frame: ReturnType<typeof generateNodeKeyframes>[number]) => number,
   opacityState?: (frame: ReturnType<typeof generateNodeKeyframes>[number]) => boolean,
   preserveSamples = false,
-): void {
-  for (const prepared of transformTracks) {
-    node.applyManualKeyframeTrack(
-      { type: "PROPERTY", name: prepared.name },
-      prepared.track,
-    );
-  }
-  node.applyManualKeyframeTrack(
-    { type: "PROPERTY", name: "OPACITY" },
-    preserveSamples
+): PreparedPropertyTrack[] {
+  const tracks: PreparedPropertyTrack[] = [...transformTracks, {
+    name: "OPACITY",
+    track: preserveSamples
       ? sampledFloatTrack(baseOpacity, frames, opacity, opacityState)
       : sparseFloatTrack(baseOpacity, frames, opacity, 0.004, opacityState),
-  );
+  }];
+  for (const prepared of tracks) {
+    node.applyManualKeyframeTrack(
+      { type: "PROPERTY", name: prepared.name },
+      // Each native node gets an independent input. Cloned Motion bindings
+      // must not share one mutable track payload with their source.
+      trackContents(prepared.track),
+    );
+  }
+  return tracks;
+}
+
+function nativeTrackMatches(actual: ManualKeyframeTrackInput | undefined, expected: ManualKeyframeTrackInput): boolean {
+  if (!actual) return false;
+  const normalize = (track: ManualKeyframeTrackInput, float32 = false) => {
+    const result = trackContents(track);
+    // The first key has no incoming segment; native Motion stores it as HOLD.
+    const value = (input: KeyframeValue | undefined) => input?.type === "FLOAT" && float32
+      ? { type: "FLOAT", value: Math.fround(input.value) } : input;
+    return { baseValue: value(result.baseValue), keyframes: result.keyframes.map((key, index) => ({
+      timelinePosition: key.timelinePosition,
+      easing: index ? key.easing : undefined,
+      value: value(key.value),
+    })) };
+  };
+  const saved = normalize(actual);
+  return sameMotion(saved, normalize(expected)) || sameMotion(saved, normalize(expected, true));
 }
 
 function sourceBaseOpacity(node: MotionNode): number {
@@ -1594,6 +1648,10 @@ async function applyMotion(settings: MotionSettings): Promise<void> {
   const targetIds = targets.map((target) => target.id);
   const pendingRemovalIds = new Set<string>();
   const claimedServiceIds = new Set<string>();
+  const expectedTracks = new Map<string, {
+    source: PreparedPropertyTrack[];
+    services: PreparedPropertyTrack[][];
+  }>();
   const configuredLayers = Number(
     settings.other.serviceLayers ?? (settings.other.depthSplit === false ? "0" : "2"),
   );
@@ -1663,6 +1721,7 @@ async function applyMotion(settings: MotionSettings): Promise<void> {
         }
 
         const nestedJobs:NestedMotionJob[]=[];
+        const serviceTracks: PreparedPropertyTrack[][] = [];
         let backCopyIds: string[] = [];
         let surplusIds: string[] = [];
         if (useDepthLayers) {
@@ -1709,7 +1768,7 @@ async function applyMotion(settings: MotionSettings): Promise<void> {
               blurRadiusForLayer(layer, layerCount, settings.appearance.farBlur),
               createdIds.includes(copyId),
             );
-            applyTracks(
+            serviceTracks.push(applyTracks(
               resolvedCopy,
               frames,
               transformTracks,
@@ -1725,7 +1784,7 @@ async function applyMotion(settings: MotionSettings): Promise<void> {
                 ? undefined
                 : (frame) => depthBand(frame, fittedSettings.geometry.depth, layerCount) === layer,
               preserveSamples,
-            );
+            ));
             if(nestedSource)nestedJobs.push({rootId:copyId,snapshot:nestedSource,shift:entryShift,enabled:settings.other.startOnEntry===true||settings.other.loopCardAnimation===true,repeat:settings.other.loopCardAnimation===true,rewindAt,occurrences:settings.other.startOnEntry?occurrences:undefined,offset:settings.other.entryOffset??0,loopEnd:settings.motion.duration});
             resolvedCopy.setPluginData(orbitMarkerKey, JSON.stringify({
               version: 2,
@@ -1768,7 +1827,7 @@ async function applyMotion(settings: MotionSettings): Promise<void> {
           sourceForTracks,
           settings.appearance.frontShadow,
         );
-        applyTracks(
+        const sourceTracks = applyTracks(
           sourceForTracks,
           frames,
           transformTracks,
@@ -1819,6 +1878,7 @@ async function applyMotion(settings: MotionSettings): Promise<void> {
           }
         }
         changed.push(targetId);
+        expectedTracks.set(targetId, { source: sourceTracks, services: serviceTracks });
         completed = true;
         logDiagnostic("trajectory.target.completed", { targetId, serviceCount: backCopyIds.length });
       } catch (error) {
@@ -1985,7 +2045,17 @@ async function applyMotion(settings: MotionSettings): Promise<void> {
 
   // Never report success for a split front track without its complete service
   // family. This catches real-Figma invalidation that mocks cannot reproduce.
+  // Clone insertion and reordering can materialize stale inherited Motion
+  // tracks on desktop. Read the settled scene, repair mismatches, and read back
+  // again before reporting success. Merely checking that tracks exist misses
+  // a source and its depth copies playing different presets.
+  await new Promise<void>(resolve => setTimeout(resolve, 0));
   const verifiedPageNodes = findMarkedPageNodes();
+  const verificationJobs: Array<{
+    sourceId: string;
+    depthLayer?: number;
+    tracks: PreparedPropertyTrack[];
+  }> = [];
   for (const targetId of changed) {
     const verifiedSource = await figma.getNodeByIdAsync(targetId);
     if (
@@ -2010,12 +2080,52 @@ async function applyMotion(settings: MotionSettings): Promise<void> {
         `Update verification failed for ${verifiedSource.name}: expected ${expectedCopies} service layer${expectedCopies === 1 ? "" : "s"}, found ${verifiedCopies.length}.`,
       );
     }
-    const completeNodes = [verifiedSource, ...verifiedCopies];
-    for (const verifiedNode of completeNodes) {
-      if (!animatedFields.every((field) => Boolean(verifiedNode.manualKeyframeTracks[field]))) {
-        throw new Error(`Update verification failed for ${verifiedSource.name}: incomplete animation tracks.`);
+    const expected = expectedTracks.get(targetId)!;
+    verificationJobs.push({ sourceId: targetId, tracks: expected.source });
+    for (const copy of verifiedCopies) {
+      const layer = readOrbitMarker(copy)?.depthLayer;
+      if (layer === undefined || !expected.services[layer]) {
+        throw new Error(`Update verification failed for ${verifiedSource.name}: invalid depth layer.`);
       }
+      verificationJobs.push({ sourceId: targetId, depthLayer: layer, tracks: expected.services[layer] });
     }
+  }
+  const resolveVerificationNodes = async () => {
+    const families = new Map<string, MotionNode[]>();
+    for (const sourceId of changed) {
+      const source = await figma.getNodeByIdAsync(sourceId);
+      if (!source || source.type === "DOCUMENT" || source.type === "PAGE" || !isMotionNode(source)) {
+        throw new Error("Update verification failed: a source layer is unavailable.");
+      }
+      const parent = tryGetParent(source);
+      const services = hasSceneChildren(parent) ? parent.children.filter((node): node is MotionNode => {
+        const marker = readOrbitMarker(node);
+        return isMotionNode(node) && marker?.role === "back" && marker.sourceId === sourceId;
+      }) : [];
+      families.set(sourceId, [source, ...services]);
+    }
+    return verificationJobs.map(job => {
+      const family = families.get(job.sourceId)!;
+      const node = job.depthLayer === undefined ? family[0] : family.slice(1)
+        .find(node => readOrbitMarker(node)?.depthLayer === job.depthLayer);
+      if (!node || !isLiveNode(node)) throw new Error("Update verification failed: a depth layer is unavailable.");
+      return { node, job };
+    });
+  };
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const mismatches = (await resolveVerificationNodes()).flatMap(({ node, job }) => job.tracks
+      .filter(({ name, track }) => !nativeTrackMatches(node.manualKeyframeTracks[name], track))
+      .map(prepared => ({ node, ...prepared })));
+    if (!mismatches.length) break;
+    logDiagnostic("trajectory.tracks.repair", {
+      attempt: attempt + 1,
+      fields: mismatches.map(({ node, name }) => ({ nodeId: node.id, field: name })),
+    });
+    if (attempt === 2) throw new Error(`Update verification failed for ${mismatches[0].node.name}: Figma did not preserve ${mismatches[0].name}.`);
+    for (const { node, name, track } of mismatches) {
+      node.applyManualKeyframeTrack({ type: "PROPERTY", name }, trackContents(track));
+    }
+    await new Promise<void>(resolve => setTimeout(resolve, 0));
   }
 
   const containerMarker = {
@@ -2279,12 +2389,25 @@ async function clearMotion(_scope: TargetScope, recoveryAttempt=false): Promise<
 }
 
 let operationInProgress = false;
+let selectionRefreshTimer: ReturnType<typeof setTimeout> | undefined;
+
+function scheduleSelectionRefresh(): void {
+  if (operationInProgress) return;
+  if (selectionRefreshTimer !== undefined) clearTimeout(selectionRefreshTimer);
+  selectionRefreshTimer = setTimeout(() => {
+    selectionRefreshTimer = undefined;
+    try { sendSelection(); }
+    catch (error) { console.warn("Motion Loops selection refresh failed", error); }
+  }, 50);
+}
 
 figma.ui.onmessage = async (message: UiToPluginMessage) => {
   const startsOperation = message.type === "apply" || message.type === "clear";
   if (startsOperation && operationInProgress) return;
   try {
     if (startsOperation) {
+      if (selectionRefreshTimer !== undefined) clearTimeout(selectionRefreshTimer);
+      selectionRefreshTimer = undefined;
       operationInProgress = true;
       operationResultPosted = false;
       if (message.type === "apply") {
@@ -2339,5 +2462,5 @@ figma.ui.onmessage = async (message: UiToPluginMessage) => {
   }
 };
 
-figma.on("selectionchange", sendSelection);
+figma.on("selectionchange", scheduleSelectionRefresh);
 sendSelection();

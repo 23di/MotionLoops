@@ -110,10 +110,6 @@ export const builtInPresetTunings: Record<PresetId, PresetTuning> = {
     appearance: { ...orbitOneAppearance, cardSize: 0 },
     other: { centerBeforeApply: true, serviceLayers: "2", scope: "selection" },
   },
-  "orbit-3d-helix": {
-    geometry: parametric({ orient3d: true, yFrequency: 2, yAmplitude: 0.72, depth: 75, tilt: 0, turns: 1, rotation: 0 }),
-    appearance: { cardSize: 30, nearScale: 1.2, farScale: 0.48, farOpacity: 0.2 },
-  },
   "orbit-3d-eight": {
     geometry: parametric({ orient3d: true, xWave: "sin", yFrequency: 2, yAmplitude: 0.62, depthWave: "cos", depth: 70, tilt: 0, rotation: 0 }),
     appearance: { cardSize: 30, nearScale: 1.2, farScale: 0.5, farOpacity: 0.22 },

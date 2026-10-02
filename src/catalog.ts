@@ -15,7 +15,6 @@ export const families: { name: string; description: string; variants: { id: Pres
     { id: "orbit-3d-ring", name: "Spatial" }, { id: "circle", name: "Flat" },
   ] },
   { name: "Orbit 01", description: "Cards follow a tilted spatial orbit", variants: [{ id: "orbit-3d-tilted", name: "Tilted" }] },
-  { name: "Orbit 02", description: "Cards travel through a double-loop orbit", variants: [{ id: "orbit-3d-helix", name: "Double loop" }] },
   { name: "Orbit 03", description: "Cards cross along a spatial figure eight", variants: [{ id: "orbit-3d-eight", name: "Figure eight" }] },
   { name: "Orbit 04", description: "A compact tilted orbit with a paced rotation", variants: [{ id: "orbit-3d-compact", name: "Compact" }] },
   { name: "Contour", description: "A continuous stream along a shaped path", variants: [

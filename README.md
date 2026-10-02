@@ -13,6 +13,7 @@ Motion Loops is completely free. Everything runs locally — no analytics, no tr
 - Use one capability-driven DialKit editor: Motion, Cards, Trajectory and Other
 - Preview the generated animation before applying it
 - Save custom presets locally and reuse them later
+- Choose a UI language in Other, with automatic detection and a saved manual override
 - Refresh an existing Motion Loops animation or clear its generated tracks
 - Start animations inside a card when it enters the frame, with an earlier/later offset
 
@@ -21,6 +22,12 @@ The pseudo-3D presets use the Motion properties currently available to plugins: 
 Select the outer card groups and enable **Motion → Start when card is main** to align their nested animations to each time a card becomes the main card during the cycle. **Offset (s)** appears below it: zero is centered, negative starts earlier, positive starts later. Existing delays between child animations remain intact. Native card compositions wrap playback across the timeline boundary: a returning duplicate starts as soon as it becomes main, and its remaining animation continues at time zero.
 
 Apply converts nested Figma presets to manual keyframes using Motion Stagger's converter, including their existing preset offsets. Conversion is a separate native Undo step. Reapplying uses the saved original timing, so offsets do not accumulate. Disable the toggle and Apply, or Clear the outer animation, to restore the original nested timing; converted presets remain editable keyframes. Depth copies share timing across layer handoffs. The plugin preview shows card movement; nested playback is visible in Figma Motion after Apply.
+
+## Interface language
+
+**Other → Language** offers Automatic, English, Japanese, Korean, French, German, Spanish for Spain or Latin America, and Brazilian Portuguese — the [languages supported by Figma](https://help.figma.com/hc/en-us/articles/6956360971415-Change-your-language-preference).
+
+Automatic follows the first supported language in the browser/system preferences exposed to the plugin iframe, using English when none match. Manual choices persist locally, and selecting Automatic restores detection. Figma does not expose its account language through the plugin API. Switching UI language preserves motion settings, JSON keys, preset IDs, and custom preset names. Built-in recipe names and automatically generated saved-preset names are translated for display. Technical diagnostics and unknown host errors retain their original text.
 
 ## Demo
 

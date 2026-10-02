@@ -15,7 +15,7 @@ assert.equal(familyFor("reference-carousel-05").name,"Row 01","Saved native pres
 assert.equal(familyFor("reference-stack-01").name,"Stack","The remaining stack uses the unnumbered gallery name");
 assert.equal(familyFor("reference-stack-04").name,"Stack 04","Retired stack remains loadable under its saved name");
 
-for (const id of ["orbit-3d-tilted", "orbit-3d-helix", "orbit-3d-eight", "path-wave", "orbit-3d-sphere", "vortex", "racetrack"] as const) {
+for (const id of ["orbit-3d-tilted", "orbit-3d-eight", "path-wave", "orbit-3d-sphere", "vortex", "racetrack"] as const) {
   assert.equal(freshPreset(id).appearance.cardSize, 30, `${id}: shared default card size`);
 }
 
@@ -75,7 +75,9 @@ assert(motionFingerprint({...baseline, motion: {...baseline.motion, duration: 9}
 assert.equal(motionFingerprint({...baseline, other: {...baseline.other, scope: "children"}}), motionFingerprint(baseline), "Changing selection scope is not a new preset");
 assert.equal(new Set(ids).size, ids.length, "Variants must not repeat between families");
 assert(!ids.includes("pendulum"), "Swing must be retired from the active catalog");
-assert.equal(families.length, 10, "Orbit 04 is added to the active catalog");
+assert.equal(families.length, 9, "The duplicate Orbit 02 is retired from the active catalog");
+assert(!ids.some(id=>String(id)==="orbit-3d-helix"), "Orbit 02 must not appear in the gallery");
+assert(!presetOptions.some(option=>String(option.value)==="orbit-3d-helix"), "Orbit 02 must not be seeded as a built-in preset");
 assert(!ids.includes("crosscurrent"), "Counterflow must be retired from the active gallery");
 assert(!ids.includes("tile-wave"), "Ripple must be retired from the active gallery");
 assert(ids.includes("bloom"), "Bloom must appear in the active gallery");
@@ -83,7 +85,7 @@ assert(!presetOptions.some(option=>String(option.value)==="tile-wave"), "Ripple 
 const retiredRipple=freshPreset("tile-wave");
 assert.deepEqual(parseSettingsJson(serializeSettingsJson(retiredRipple),retiredRipple),retiredRipple,"Existing Ripple JSON remains readable");
 assert.equal(families.find(f=>f.variants.some(v=>v.id==="orbit-3d-ring"))?.name,"Cilinder","Circuit is renamed");
-for(const id of ["orbit-3d-tilted","orbit-3d-helix","orbit-3d-eight"] as const)assert(ids.includes(id),"Restored orbit: "+id);
+for(const id of ["orbit-3d-tilted","orbit-3d-eight","orbit-3d-compact"] as const)assert(ids.includes(id),"Active orbit: "+id);
 assert(!ids.includes("cover-flow")&&!ids.includes("falling-stack"), "Focus and Cascade are retired from the gallery");
 
 const bloom=freshPreset("bloom");

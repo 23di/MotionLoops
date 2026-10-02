@@ -268,13 +268,13 @@ for(let step=0;step<24;step++){
 }
 assert(Math.min(...fitRatios)<.9,"The user Queue setup needs path fitting");
 assert(Math.max(...fitRatios)-Math.min(...fitRatios)<1e-8,"Queue Fit stays constant during steps and pauses");
-const helix=freshPreset("orbit-3d-helix");
-const orbit02Queue={...rowSettings,geometry:{...helix.geometry},appearance:{...helix.appearance}};
+const eight=freshPreset("orbit-3d-eight");
+const orbit03Queue={...rowSettings,geometry:{...eight.geometry},appearance:{...eight.appearance}};
 for(const time of [0,2.25,4.5,9,13.5]){
-  const cards=referenceScene(orbit02Queue,flags,576,264,time*orbit02Queue.motion.duration/18);
+  const cards=referenceScene(orbit03Queue,flags,576,264,time*orbit03Queue.motion.duration/18);
   const largest=cards.reduce((front,card)=>card.width>front.width?card:front);
   assert(Math.hypot(largest.x-288,largest.y-132)<1e-6,
-    "Orbit 02 Queue keeps the largest card at the frame center");
+    "Orbit 03 Queue keeps the largest card at the frame center");
 }
 for(const family of families)for(const variant of family.variants){
   const original=freshPreset(variant.id),queued=applyAnimation(original,"queue");
